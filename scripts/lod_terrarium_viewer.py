@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import heapq
 import math
 import time
 import urllib.parse
 import webbrowser
+import laspy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from typing import Any
 import requests
 import numpy as np
 from PIL import Image
+from pyproj import CRS, Transformer
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import from_origin
@@ -23,6 +26,7 @@ import rasterio.windows
 
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 TERRARIUM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+NODATA = -9999.0
 
 
 HTML = r"""<!doctype html>
@@ -62,7 +66,7 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
 .modal h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
 .modal label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
 .modal .bbox-grid label { display: block; margin: 0; }
-.modal select, .modal button, .modal input[type=number] { width: 100%; margin: 6px 0 10px; color: #eee; background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 7px; box-sizing: border-box; }
+.modal select, .modal button, .modal input[type=number], .modal input[type=text] { width: 100%; margin: 6px 0 10px; color: #eee; background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 7px; box-sizing: border-box; }
 .modal button { cursor: pointer; background: #263247; }
 .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 .modal-actions button { margin: 0; }
@@ -89,7 +93,9 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
     <div class="layer-line">
       <label><input id="showCloud" type="checkbox"><span class="swatch red"></span>Cloud DEM</label>
       <button id="frameCloud" class="icon-button" title="Frame Point Cloud" aria-label="Frame Point Cloud">&#128247;</button>
+      <button id="openCloudSettings" class="icon-button" title="Cloud DEM settings" aria-label="Cloud DEM settings">&#9881;</button>
     </div>
+    <label><input id="showPointCloud" type="checkbox"><span class="swatch green"></span>Point Cloud</label>
     <div class="layer-line">
       <label><input id="showBlended" type="checkbox"><span class="swatch yellow"></span>Blended DEM</label>
       <button id="openBlendSettings" class="icon-button" title="Blending settings" aria-label="Blending settings">&#9881;</button>
@@ -104,6 +110,23 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
   </details>
   <div id="meta" class="status">Loading metadata...</div>
   <div class="hint">drag: rotate | wheel: zoom | shift+drag: pan</div>
+</div>
+<div id="cloudModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cloudModalTitle">
+  <div class="modal">
+    <h2 id="cloudModalTitle">Cloud DEM Settings</h2>
+    <label for="cloudLasDir">LAS folder</label>
+    <input id="cloudLasDir" type="text" placeholder="E:\path\to\las_folder">
+    <label for="cloudSourceCrs">Source CRS when LAS has no CRS</label>
+    <input id="cloudSourceCrs" type="text" value="EPSG:32630">
+    <label for="cloudPixelSize">DEM pixel size (m)</label>
+    <input id="cloudPixelSize" type="number" min="0.01" step="0.01" value="0.5">
+    <label for="cloudChunkSize">Chunk size</label>
+    <input id="cloudChunkSize" type="number" min="1" step="100000" value="1000000">
+    <div class="modal-actions">
+      <button id="acceptCloudSettings">Load</button>
+      <button id="cancelCloudSettings">Cancel</button>
+    </div>
+  </div>
 </div>
 <div id="terrariumModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="terrariumModalTitle">
   <div class="modal">
@@ -172,6 +195,12 @@ let appliedTerrariumSettings = {
   useManualBbox: false,
   bbox: null
 };
+let appliedCloudSettings = {
+  lasDir: "",
+  sourceCrs: "EPSG:32630",
+  pixelSizeM: 0.5,
+  chunkSize: 1000000
+};
 
 function shader(type, source) {
   const s = gl.createShader(type);
@@ -224,6 +253,17 @@ void main() {
   vec3 shaded = color * (ambient + (1.0 - ambient) * diffuse) + vec3(specular);
   gl_FragColor = vec4(shaded, 1.0);
 }
+`);
+
+const pointProgram = program(`
+attribute vec3 p;
+uniform mat4 mvp;
+uniform float pointSize;
+void main() { gl_Position = mvp * vec4(p, 1.0); gl_PointSize = pointSize; }
+`, `
+precision mediump float;
+uniform vec3 color;
+void main() { gl_FragColor = vec4(color, 1.0); }
 `);
 
 function finite(v) { return v !== null && Number.isFinite(v); }
@@ -293,6 +333,14 @@ function makeMesh(data, zs) {
   const lines = buildLines(data, zs);
   const tris = buildTriangles(data, zs);
   return {lineBuffer: buffer(lines), lineCount: lines.length / 3, triBuffer: buffer(tris.positions), normalBuffer: buffer(tris.normals), flatNormalBuffer: buffer(tris.flatNormals), triCount: tris.positions.length / 3};
+}
+
+function makePointCloud(points) {
+  const positions = [];
+  for (const p of points || []) {
+    positions.push((p[0] - scene.cx) / scene.extent, (p[2] - scene.cz) * 3.0 / scene.extent, (p[1] - scene.cy) / scene.extent);
+  }
+  return {pointBuffer: buffer(new Float32Array(positions)), pointCount: positions.length / 3};
 }
 
 function explicitPoint(p) {
@@ -470,12 +518,16 @@ function rebuildMeshes() {
   meshes = {
     terrarium: {mesh: makeMesh(currentTerrainGrid, current.terrarium), color: [0.2, 0.55, 1.0], control: "showTerrarium"},
     cloud: {mesh: makeMesh(currentCloudGrid, currentCloudGrid.z), color: [1.0, 0.18, 0.15], control: "showCloud"},
-    blended: {mesh: blendedMesh, color: [0.95, 0.70, 0.18], control: "showBlended"}
+    blended: {mesh: blendedMesh, color: [0.95, 0.70, 0.18], control: "showBlended"},
+    points: {mesh: makePointCloud(current.point_sample), color: [0.32, 0.82, 0.45], control: "showPointCloud", kind: "points"}
   };
 }
 
 function framePointCloud() {
-  if (!current) return;
+  if (!current || !current.bbox || !current.bbox.point_cloud) {
+    metaEl.textContent = "Cloud DEM is not loaded.";
+    return;
+  }
   setSceneFrame(current.bbox.point_cloud);
   rebuildMeshes();
 }
@@ -523,6 +575,36 @@ function writeTerrariumSettingsToForm(settings) {
   document.getElementById("lod").value = String(settings.lod);
   document.getElementById("useManualBbox").checked = settings.useManualBbox;
   if (settings.bbox) setBboxInputs(settings.bbox);
+}
+
+function readCloudSettingsFromForm() {
+  const settings = {
+    lasDir: document.getElementById("cloudLasDir").value.trim(),
+    sourceCrs: document.getElementById("cloudSourceCrs").value.trim(),
+    pixelSizeM: Number(document.getElementById("cloudPixelSize").value),
+    chunkSize: Number(document.getElementById("cloudChunkSize").value)
+  };
+  if (!settings.lasDir) throw new Error("LAS folder is required");
+  if (!settings.sourceCrs) throw new Error("Source CRS is required");
+  if (!Number.isFinite(settings.pixelSizeM) || settings.pixelSizeM <= 0) throw new Error("DEM pixel size must be greater than zero");
+  if (!Number.isInteger(settings.chunkSize) || settings.chunkSize <= 0) throw new Error("Chunk size must be a positive integer");
+  return settings;
+}
+
+function writeCloudSettingsToForm(settings) {
+  document.getElementById("cloudLasDir").value = settings.lasDir;
+  document.getElementById("cloudSourceCrs").value = settings.sourceCrs;
+  document.getElementById("cloudPixelSize").value = String(settings.pixelSizeM);
+  document.getElementById("cloudChunkSize").value = String(settings.chunkSize);
+}
+
+function openCloudModal() {
+  writeCloudSettingsToForm(appliedCloudSettings);
+  document.getElementById("cloudModal").classList.add("active");
+}
+
+function closeCloudModal() {
+  document.getElementById("cloudModal").classList.remove("active");
 }
 
 function readManualBbox(settings = appliedTerrariumSettings) {
@@ -596,6 +678,9 @@ async function loadInfo() {
     bbox: info.cloud_bbox
   };
   writeTerrariumSettingsToForm(appliedTerrariumSettings);
+  if (info.cloud_source && info.cloud_source.source_crs) {
+    appliedCloudSettings.sourceCrs = info.cloud_source.source_crs;
+  }
   const blurRadius = document.getElementById("blurRadiusM");
   const defaultBlurRadius = Number(info.default_blur_radius_m ?? blurRadius.value);
   blurRadius.value = String(Math.round(defaultBlurRadius));
@@ -604,7 +689,7 @@ async function loadInfo() {
   writeBlendSettingsToForm(appliedBlendSettings);
   setBboxInputs(info.cloud_bbox);
   updateSliderLabels();
-  metaEl.textContent = `Choose a Terrarium LoD and recalculate.\nCloud BBOX: ${formatBbox(info.cloud_bbox)}`;
+  metaEl.textContent = `Choose a Terrarium LoD and recalculate.\nCloud DEM: ${info.cloud_loaded ? "loaded" : "not loaded"}\nCloud BBOX: ${formatBbox(info.cloud_bbox)}`;
   setBusy(false);
 }
 
@@ -630,10 +715,12 @@ function updateMetaText() {
       refinementText = `\nBlend refinement: on | not applied (${current.refined_mesh.reason})`;
     }
   }
-  metaEl.textContent = `Terrarium z${current.lod} | ${current.resolution_m.toFixed(2)} m/px | ${current.nx}x${current.ny}\nCloud DEM fixed | ${cloudGrid.resolution_m.toFixed(2)} m/px | ${cloudGrid.nx}x${cloudGrid.ny}\nBlended DEM strategy: ${blendStrategyLabel()}\n${current.tiles.length} tiles | blend cloud cells: ${current.cloud_valid_count}\nBlend radius: ${current.blend_radius_m.toFixed(2)} m | blur radius: ${current.blur_radius_m.toFixed(2)} m${refinementText}\nTerrarium DEM BBOX: ${formatBbox(current.bbox.terrarium_dem)}\nPoint Cloud BBOX: ${formatBbox(current.bbox.point_cloud)}`;
+  const pointCount = current.point_sample ? current.point_sample.length : 0;
+  const cacheText = current.cloud_source && current.cloud_source.cache_hit ? " | cache hit" : "";
+  metaEl.textContent = `Terrarium z${current.lod} | ${current.resolution_m.toFixed(2)} m/px | ${current.nx}x${current.ny}\nCloud DEM ${current.cloud_loaded ? "loaded" : "not loaded"}${cacheText} | fixed view ${cloudGrid.resolution_m.toFixed(2)} m/px | ${cloudGrid.nx}x${cloudGrid.ny}\nPoint Cloud sample: ${pointCount} points\nBlended DEM strategy: ${blendStrategyLabel()}\n${current.tiles.length} tiles | blend cloud cells: ${current.cloud_valid_count}\nBlend radius: ${current.blend_radius_m.toFixed(2)} m | blur radius: ${current.blur_radius_m.toFixed(2)} m${refinementText}\nTerrarium DEM BBOX: ${formatBbox(current.bbox.terrarium_dem)}\nPoint Cloud BBOX: ${formatBbox(current.bbox.point_cloud)}`;
 }
 
-async function loadMesh(forcedLod = null) {
+async function loadMesh(forcedLod = null, frameTarget = null) {
   const lod = document.getElementById("lod");
   const requestedBlendSettings = readBlendSettingsFromForm();
   let requestedTerrariumSettings;
@@ -645,9 +732,10 @@ async function loadMesh(forcedLod = null) {
   }
   const useManualBbox = document.getElementById("useManualBbox");
   const bboxInputs = ["bboxMinX", "bboxMinY", "bboxMaxX", "bboxMaxY"].map(id => document.getElementById(id));
-  const bboxButtons = ["resetBbox", "openBlendSettings", "openTerrariumSettings"].map(id => document.getElementById(id));
+  const bboxButtons = ["resetBbox", "openBlendSettings", "openTerrariumSettings", "openCloudSettings"].map(id => document.getElementById(id));
   const blendControls = ["blendStrategy", "tessellationStrategy", "blurRadiusM", "refineBlends", "acceptBlendSettings", "cancelBlendSettings"].map(id => document.getElementById(id));
   const terrariumControls = ["lod", "useManualBbox", "acceptTerrariumSettings", "cancelTerrariumSettings"].map(id => document.getElementById(id));
+  const cloudControls = ["cloudLasDir", "cloudSourceCrs", "cloudPixelSize", "cloudChunkSize", "acceptCloudSettings", "cancelCloudSettings"].map(id => document.getElementById(id));
   if (Number.isInteger(forcedLod)) {
     requestedTerrariumSettings.lod = forcedLod;
     lod.value = String(forcedLod);
@@ -665,7 +753,7 @@ async function loadMesh(forcedLod = null) {
   }
   lod.disabled = true;
   useManualBbox.disabled = true;
-  for (const element of bboxInputs.concat(bboxButtons).concat(blendControls).concat(terrariumControls)) element.disabled = true;
+  for (const element of bboxInputs.concat(bboxButtons).concat(blendControls).concat(terrariumControls).concat(cloudControls)) element.disabled = true;
   setBusy(true, `Waiting for backend: downloading / recalculating z${z}...`);
   metaEl.textContent = `Downloading / recalculating z${z}...`;
   try {
@@ -678,14 +766,53 @@ async function loadMesh(forcedLod = null) {
     currentCloudGrid = data.cloud_layer;
     appliedBlendSettings = requestedBlendSettings;
     appliedTerrariumSettings = requestedTerrariumSettings;
-    framePointCloud();
+    if (frameTarget === "cloud" && data.bbox && data.bbox.point_cloud) framePointCloud();
+    else if (frameTarget === "terrarium" || !data.bbox || !data.bbox.point_cloud) frameTerrarium();
+    else rebuildMeshes();
     updateMetaText();
   } catch (e) {
     metaEl.textContent = `Failed: ${e.message}`;
   } finally {
     lod.disabled = false;
     useManualBbox.disabled = false;
-    for (const element of bboxInputs.concat(bboxButtons).concat(blendControls).concat(terrariumControls)) element.disabled = false;
+    for (const element of bboxInputs.concat(bboxButtons).concat(blendControls).concat(terrariumControls).concat(cloudControls)) element.disabled = false;
+    setBusy(false);
+  }
+}
+
+async function loadCloudDem() {
+  let settings;
+  try {
+    settings = readCloudSettingsFromForm();
+  } catch (e) {
+    metaEl.textContent = `Failed: ${e.message}`;
+    return;
+  }
+  closeCloudModal();
+  setBusy(true, "Waiting for backend: building Cloud DEM from LAS...");
+  metaEl.textContent = "Building Cloud DEM from LAS files...";
+  const controls = ["openCloudSettings", "cloudLasDir", "cloudSourceCrs", "cloudPixelSize", "cloudChunkSize", "acceptCloudSettings", "cancelCloudSettings"].map(id => document.getElementById(id));
+  for (const element of controls) element.disabled = true;
+  try {
+    const query = `las_dir=${encodeURIComponent(settings.lasDir)}&source_crs=${encodeURIComponent(settings.sourceCrs)}&pixel_size_m=${encodeURIComponent(settings.pixelSizeM)}&chunk_size=${encodeURIComponent(settings.chunkSize)}`;
+    const result = await fetch(`/api/cloud_dem?${query}`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+    appliedCloudSettings = settings;
+    appliedTerrariumSettings = {
+      lod: appliedTerrariumSettings.lod,
+      useManualBbox: true,
+      bbox: result.bbox
+    };
+    writeTerrariumSettingsToForm(appliedTerrariumSettings);
+    document.getElementById("showCloud").checked = true;
+    document.getElementById("showPointCloud").checked = true;
+    await loadMesh(null, "cloud");
+  } catch (e) {
+    metaEl.textContent = `Failed: ${e.message}`;
+  } finally {
+    for (const element of controls) element.disabled = false;
     setBusy(false);
   }
 }
@@ -762,6 +889,17 @@ function drawShaded(layer, mvp, normalBuffer) {
 }
 function drawFlat(layer, mvp) { drawShaded(layer, mvp, layer.mesh.flatNormalBuffer); }
 function drawPhong(layer, mvp) { drawShaded(layer, mvp, layer.mesh.normalBuffer); }
+function drawPoints(layer, mvp) {
+  gl.useProgram(pointProgram);
+  gl.bindBuffer(gl.ARRAY_BUFFER, layer.mesh.pointBuffer);
+  const pLoc = gl.getAttribLocation(pointProgram, "p");
+  gl.vertexAttribPointer(pLoc, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(pLoc);
+  gl.uniformMatrix4fv(gl.getUniformLocation(pointProgram, "mvp"), false, mvp);
+  gl.uniform3fv(gl.getUniformLocation(pointProgram, "color"), new Float32Array(layer.color));
+  gl.uniform1f(gl.getUniformLocation(pointProgram, "pointSize"), 4.0);
+  gl.drawArrays(gl.POINTS, 0, layer.mesh.pointCount);
+}
 function render() {
   resize();
   gl.clearColor(0.065, 0.065, 0.07, 1);
@@ -773,7 +911,8 @@ function render() {
   const mvp = matMul(perspective(Math.PI/4, aspect, 0.01, 100), lookAt(eye, center, [0,1,0]));
   const mode = document.getElementById("mode").value;
   for (const layer of selectedLayers()) {
-    if (mode === "phong") drawPhong(layer, mvp);
+    if (layer.kind === "points") drawPoints(layer, mvp);
+    else if (mode === "phong") drawPhong(layer, mvp);
     else if (mode === "flat") drawFlat(layer, mvp);
     else drawWire(layer, mvp);
   }
@@ -781,6 +920,18 @@ function render() {
 }
 document.getElementById("frameCloud").addEventListener("click", framePointCloud);
 document.getElementById("frameTerrarium").addEventListener("click", frameTerrarium);
+document.getElementById("openCloudSettings").addEventListener("click", openCloudModal);
+document.getElementById("acceptCloudSettings").addEventListener("click", loadCloudDem);
+document.getElementById("cancelCloudSettings").addEventListener("click", () => {
+  writeCloudSettingsToForm(appliedCloudSettings);
+  closeCloudModal();
+});
+document.getElementById("cloudModal").addEventListener("click", e => {
+  if (e.target.id === "cloudModal") {
+    writeCloudSettingsToForm(appliedCloudSettings);
+    closeCloudModal();
+  }
+});
 document.getElementById("openTerrariumSettings").addEventListener("click", openTerrariumModal);
 document.getElementById("acceptTerrariumSettings").addEventListener("click", () => {
   try {
@@ -820,7 +971,7 @@ document.getElementById("blendModal").addEventListener("click", e => {
 document.getElementById("resetBbox").addEventListener("click", () => {
   resetBboxToCloud();
 });
-loadInfo().then(() => loadMesh(INITIAL_LOD));
+loadInfo().then(() => loadMesh(INITIAL_LOD, "terrarium"));
 render();
 </script>
 </body>
@@ -845,16 +996,21 @@ class TerrainContext:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         grid = self.report["grid"]
-        self.bounds = tuple(float(v) for v in grid["bounds_3857"])
-        self.dem_width = int(grid["width"])
-        self.dem_height = int(grid["height"])
+        self.terrarium_bounds = tuple(float(v) for v in grid["bounds_3857"])
+        self.bounds: tuple[float, float, float, float] | None = None
+        self.dem_width = 0
+        self.dem_height = 0
         self.dem_pixel_size = float(self.report["parameters"]["pixel_size_m"])
-        self.dem_path = self.root / self.report["outputs"]["dem_memmap"]
-        self.dem = np.memmap(self.dem_path, dtype="float32", mode="r", shape=(self.dem_height, self.dem_width))
-        self.dem_tif_path = self.root / self.report["outputs"]["cloud_dem_geotiff"]
+        self.dem_path: Path | None = None
+        self.dem_tif_path: Path | None = None
+        self.cloud_loaded = False
+        self.cloud_source: dict[str, Any] | None = None
+        self.point_sample: list[list[float]] = []
+        self.point_sample_path: Path | None = None
         self.max_lod = max_lod
         viewer_stride = int(self.report.get("viewer", {}).get("stride", 53))
         self.cloud_resolution_m = float(cloud_resolution_m) if cloud_resolution_m else viewer_stride * self.dem_pixel_size
+        self.cloud_resolution_override = cloud_resolution_m is not None
         self.blend_refinement_resolution_m = (
             float(blend_refinement_resolution_m) if blend_refinement_resolution_m else self.cloud_resolution_m
         )
@@ -880,7 +1036,7 @@ class TerrainContext:
     def covering_tiles(
         self, z: int, bounds: tuple[float, float, float, float] | None = None
     ) -> list[tuple[int, int]]:
-        minx, miny, maxx, maxy = bounds if bounds is not None else self.bounds
+        minx, miny, maxx, maxy = bounds if bounds is not None else self.terrarium_bounds
         x0, y0 = self.mercator_to_tile(minx, maxy, z)
         x1, y1 = self.mercator_to_tile(maxx, miny, z)
         return [(x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
@@ -917,7 +1073,7 @@ class TerrainContext:
     def terrarium_grid(
         self, z: int, bounds: tuple[float, float, float, float] | None = None
     ) -> dict[str, Any]:
-        minx, miny, maxx, maxy = bounds if bounds is not None else self.bounds
+        minx, miny, maxx, maxy = bounds if bounds is not None else self.terrarium_bounds
         res = 2 * WEB_MERCATOR_HALF_WORLD / (2**z * 256)
         x0, y0 = self.mercator_to_tile(minx, maxy, z)
         x1, y1 = self.mercator_to_tile(maxx, miny, z)
@@ -945,6 +1101,8 @@ class TerrainContext:
     def sample_cloud(self, xs: np.ndarray, ys: np.ndarray, resolution: float) -> np.ndarray:
         half = resolution / 2.0
         cloud = np.full((len(ys), len(xs)), np.nan, dtype=np.float32)
+        if not self.cloud_loaded or self.dem_tif_path is None:
+            return cloud
         with rasterio.open(self.dem_tif_path) as src:
             dst_transform = from_origin(float(xs[0] - half), float(ys[0] + half), resolution, resolution)
             reproject(
@@ -963,6 +1121,8 @@ class TerrainContext:
         return cloud
 
     def exact_cloud_footprint_min(self, xs: np.ndarray, ys: np.ndarray, resolution: float) -> np.ndarray:
+        if not self.cloud_loaded or self.bounds is None or self.dem_tif_path is None:
+            return np.full((len(ys), len(xs)), np.nan, dtype=np.float32)
         minx, miny, maxx, maxy = self.bounds
         half = resolution / 2.0
         cloud = np.full((len(ys), len(xs)), np.nan, dtype=np.float32)
@@ -989,6 +1149,12 @@ class TerrainContext:
     def fixed_cloud_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self._cloud_layer_arrays is not None:
             return self._cloud_layer_arrays
+        if not self.cloud_loaded or self.bounds is None:
+            xs = np.asarray([], dtype=np.float64)
+            ys = np.asarray([], dtype=np.float64)
+            cloud = np.empty((0, 0), dtype=np.float32)
+            self._cloud_layer_arrays = (xs, ys, cloud)
+            return self._cloud_layer_arrays
         minx, miny, maxx, maxy = self.bounds
         res = self.cloud_resolution_m
         nx = int(math.ceil((maxx - minx) / res))
@@ -1011,6 +1177,7 @@ class TerrainContext:
             "ys": np.round(ys, 3).tolist(),
             "z": [None if not np.isfinite(v) else round(float(v), 3) for v in cloud.reshape(-1)],
             "valid_count": int(np.isfinite(cloud).sum()),
+            "loaded": bool(self.cloud_loaded),
             "note": "Fixed-resolution Cloud DEM visualization layer, independent of selected Terrarium LoD.",
         }
         return self._cloud_layer
@@ -1022,6 +1189,319 @@ class TerrainContext:
             "maxx": float(bounds[2]),
             "maxy": float(bounds[3]),
         }
+
+    def header_info(self, las_files: list[Path], fallback_crs: CRS) -> tuple[list[dict[str, Any]], CRS]:
+        infos: list[dict[str, Any]] = []
+        detected_crs: CRS | None = None
+        for path in las_files:
+            with laspy.open(path) as src:
+                header = src.header
+                crs = header.parse_crs()
+                if crs is not None and detected_crs is None:
+                    detected_crs = crs
+                infos.append(
+                    {
+                        "name": path.name,
+                        "path": str(path),
+                        "size_bytes": path.stat().st_size,
+                        "point_count": int(header.point_count),
+                        "mins": [float(v) for v in header.mins],
+                        "maxs": [float(v) for v in header.maxs],
+                        "crs_in_header": crs.to_string() if crs else None,
+                    }
+                )
+        return infos, detected_crs or fallback_crs
+
+    def transformed_bounds(self, infos: list[dict[str, Any]], transformer: Transformer) -> tuple[float, float, float, float]:
+        minx = min(info["mins"][0] for info in infos)
+        miny = min(info["mins"][1] for info in infos)
+        maxx = max(info["maxs"][0] for info in infos)
+        maxy = max(info["maxs"][1] for info in infos)
+        corners_x = [minx, minx, maxx, maxx]
+        corners_y = [miny, maxy, miny, maxy]
+        tx, ty = transformer.transform(corners_x, corners_y)
+        return min(tx), min(ty), max(tx), max(ty)
+
+    def rasterize_las_min_z(
+        self,
+        las_files: list[Path],
+        dem: np.memmap,
+        bounds: tuple[float, float, float, float],
+        pixel_size: float,
+        transformer: Transformer,
+        chunk_size: int,
+    ) -> dict[str, Any]:
+        minx, _miny, _maxx, maxy = bounds
+        height, width = dem.shape
+        flat_dem = dem.reshape(-1)
+        total_points = 0
+        used_points = 0
+        per_file = []
+        for path in las_files:
+            file_points = 0
+            file_used = 0
+            t0 = time.perf_counter()
+            with laspy.open(path) as src:
+                for points in src.chunk_iterator(chunk_size):
+                    x, y = transformer.transform(points.x, points.y)
+                    z = np.asarray(points.z, dtype=np.float32)
+                    cols = np.floor((x - minx) / pixel_size).astype(np.int64)
+                    rows = np.floor((maxy - y) / pixel_size).astype(np.int64)
+                    valid = (cols >= 0) & (cols < width) & (rows >= 0) & (rows < height) & np.isfinite(z)
+                    if valid.any():
+                        flat = rows[valid] * width + cols[valid]
+                        np.minimum.at(flat_dem, flat, z[valid])
+                        file_used += int(valid.sum())
+                    file_points += len(z)
+            total_points += file_points
+            used_points += file_used
+            per_file.append(
+                {
+                    "name": path.name,
+                    "points": file_points,
+                    "points_used": file_used,
+                    "elapsed_seconds": round(time.perf_counter() - t0, 3),
+                }
+            )
+            dem.flush()
+        valid_cells = int(np.isfinite(dem).sum())
+        return {
+            "total_points": total_points,
+            "points_used": used_points,
+            "valid_cells": valid_cells,
+            "valid_cell_fraction": valid_cells / float(height * width),
+            "per_file": per_file,
+        }
+
+    def write_cloud_geotiff(
+        self, path: Path, dem: np.ndarray, bounds: tuple[float, float, float, float], pixel_size: float, crs: CRS
+    ) -> None:
+        minx, _miny, _maxx, maxy = bounds
+        transform = from_origin(minx, maxy, pixel_size, pixel_size)
+        out = np.where(np.isfinite(dem), dem, NODATA).astype("float32")
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=dem.shape[0],
+            width=dem.shape[1],
+            count=1,
+            dtype="float32",
+            crs=crs,
+            transform=transform,
+            nodata=NODATA,
+            compress="deflate",
+            tiled=True,
+            BIGTIFF="IF_SAFER",
+        ) as dst:
+            dst.write(out, 1)
+
+    def cloud_cache_key(
+        self, las_dir: Path, las_files: list[Path], source_crs_text: str, actual_source_crs: CRS, pixel_size_m: float
+    ) -> str:
+        payload = {
+            "las_dir": str(las_dir.resolve()),
+            "source_crs_requested": source_crs_text,
+            "source_crs_actual": actual_source_crs.to_string(),
+            "target_crs": "EPSG:3857",
+            "pixel_size_m": pixel_size_m,
+            "files": [
+                {
+                    "name": path.name,
+                    "size": path.stat().st_size,
+                    "mtime_ns": path.stat().st_mtime_ns,
+                }
+                for path in las_files
+            ],
+        }
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def sample_las_points(
+        self,
+        las_files: list[Path],
+        infos: list[dict[str, Any]],
+        transformer: Transformer,
+        sample_count: int,
+        chunk_size: int,
+        seed_text: str,
+    ) -> list[list[float]]:
+        total_points = sum(int(info["point_count"]) for info in infos)
+        if total_points <= 0:
+            return []
+        count = min(sample_count, total_points)
+        rng = np.random.default_rng(int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:16], 16))
+        selected = np.sort(rng.choice(total_points, size=count, replace=False))
+        selected_pos = 0
+        global_offset = 0
+        sampled: list[list[float]] = []
+        for path in las_files:
+            with laspy.open(path) as src:
+                for points in src.chunk_iterator(chunk_size):
+                    chunk_len = len(points.x)
+                    chunk_start = global_offset
+                    chunk_end = global_offset + chunk_len
+                    while selected_pos < count and selected[selected_pos] < chunk_start:
+                        selected_pos += 1
+                    start_pos = selected_pos
+                    while selected_pos < count and selected[selected_pos] < chunk_end:
+                        selected_pos += 1
+                    if selected_pos > start_pos:
+                        local_idx = selected[start_pos:selected_pos] - chunk_start
+                        chunk_x = np.asarray(points.x)
+                        chunk_y = np.asarray(points.y)
+                        chunk_z = np.asarray(points.z)
+                        x, y = transformer.transform(chunk_x[local_idx], chunk_y[local_idx])
+                        z = np.asarray(chunk_z[local_idx], dtype=np.float64)
+                        for px, py, pz in zip(x, y, z):
+                            sampled.append([round(float(px), 3), round(float(py), 3), round(float(pz), 3)])
+                    global_offset = chunk_end
+        return sampled
+
+    def activate_cloud_assets(
+        self,
+        dem_path: Path,
+        geotiff_path: Path,
+        point_sample_path: Path,
+        source: dict[str, Any],
+        bounds: tuple[float, float, float, float],
+        width: int,
+        height: int,
+        pixel_size_m: float,
+    ) -> None:
+        if not self.cloud_resolution_override:
+            self.cloud_resolution_m = max(pixel_size_m, max(bounds[2] - bounds[0], bounds[3] - bounds[1]) / 240.0)
+            self.blend_refinement_resolution_m = self.cloud_resolution_m
+            self.default_blur_radius_m = 6.0 * self.cloud_resolution_m
+        self.bounds = bounds
+        self.dem_width = width
+        self.dem_height = height
+        self.dem_pixel_size = pixel_size_m
+        self.dem_path = dem_path
+        self.dem_tif_path = geotiff_path
+        self.cloud_loaded = True
+        self.point_sample_path = point_sample_path
+        self.point_sample = json.loads(point_sample_path.read_text(encoding="utf-8"))["points"] if point_sample_path.exists() else []
+        self.cloud_source = source
+        self._cloud_layer = None
+        self._cloud_layer_arrays = None
+
+    def load_cloud_dem_from_las(
+        self, las_dir: Path, source_crs_text: str, pixel_size_m: float, chunk_size: int
+    ) -> dict[str, Any]:
+        start = time.perf_counter()
+        if not las_dir.exists() or not las_dir.is_dir():
+            raise ValueError(f"LAS folder does not exist: {las_dir}")
+        las_files = sorted(path for path in las_dir.iterdir() if path.is_file() and path.suffix.lower() == ".las")
+        if not las_files:
+            raise ValueError(f"No direct .las files found in: {las_dir}")
+        if pixel_size_m <= 0:
+            raise ValueError("pixel_size_m must be greater than zero")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
+        fallback_crs = CRS.from_user_input(source_crs_text)
+        target_crs = CRS.from_epsg(3857)
+        infos, actual_source_crs = self.header_info(las_files, fallback_crs)
+        transformer = Transformer.from_crs(actual_source_crs, target_crs, always_xy=True)
+        bounds = self.transformed_bounds(infos, transformer)
+        width = int(math.ceil((bounds[2] - bounds[0]) / pixel_size_m))
+        height = int(math.ceil((bounds[3] - bounds[1]) / pixel_size_m))
+        if width <= 0 or height <= 0:
+            raise ValueError("Computed Cloud DEM grid is empty")
+        cache_key = self.cloud_cache_key(las_dir, las_files, source_crs_text, actual_source_crs, pixel_size_m)
+        run_dir = self.out_dir / "dynamic_cloud_dem" / "cache" / cache_key
+        run_dir.mkdir(parents=True, exist_ok=True)
+        dem_path = run_dir / "cloud_minz_3857.float32.memmap"
+        geotiff_path = run_dir / "cloud_minz_3857.tif"
+        point_sample_path = run_dir / "point_sample_3857.json"
+        report_path = run_dir / "cloud_dem_load_report.json"
+        cache_hit = dem_path.exists() and geotiff_path.exists() and point_sample_path.exists() and report_path.exists()
+        if cache_hit:
+            source = json.loads(report_path.read_text(encoding="utf-8"))
+            source["cache_hit"] = True
+            self.activate_cloud_assets(dem_path, geotiff_path, point_sample_path, source, bounds, width, height, pixel_size_m)
+            payload = dict(source)
+            payload["bbox"] = self.bbox_dict(bounds)
+            payload["cloud_layer"] = self.fixed_cloud_layer()
+            payload["point_sample"] = self.point_sample
+            payload["report_json"] = str(report_path)
+            payload["report_markdown"] = str(run_dir / "cloud_dem_load_report.md")
+            return payload
+        dem = np.memmap(dem_path, dtype="float32", mode="w+", shape=(height, width))
+        dem[:] = np.inf
+        dem.flush()
+        raster_stats = self.rasterize_las_min_z(las_files, dem, bounds, pixel_size_m, transformer, chunk_size)
+        self.write_cloud_geotiff(geotiff_path, dem, bounds, pixel_size_m, target_crs)
+        dem.flush()
+        sampled_points = self.sample_las_points(las_files, infos, transformer, 10_000, chunk_size, cache_key)
+        point_sample_path.write_text(
+            json.dumps(
+                {
+                    "crs": "EPSG:3857",
+                    "sample_count": len(sampled_points),
+                    "sampling": "deterministic random sample without replacement over all direct LAS points",
+                    "points": sampled_points,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        source = {
+            "las_dir": str(las_dir),
+            "las_file_count": len(las_files),
+            "cache_key": cache_key,
+            "cache_hit": False,
+            "source_crs": actual_source_crs.to_string(),
+            "target_crs": target_crs.to_string(),
+            "pixel_size_m": pixel_size_m,
+            "chunk_size": chunk_size,
+            "bounds_3857": bounds,
+            "width": width,
+            "height": height,
+            "outputs": {"height_texture": str(geotiff_path), "memmap": str(dem_path), "point_sample": str(point_sample_path)},
+            "rasterization": raster_stats,
+            "point_sample": {
+                "count": len(sampled_points),
+                "crs": "EPSG:3857",
+                "path": str(point_sample_path),
+                "sampling": "deterministic random sample without replacement over all direct LAS points",
+            },
+            "elapsed_seconds": round(time.perf_counter() - start, 3),
+        }
+        self.activate_cloud_assets(dem_path, geotiff_path, point_sample_path, source, bounds, width, height, pixel_size_m)
+        report_path.write_text(json.dumps(source, indent=2), encoding="utf-8")
+        md_path = run_dir / "cloud_dem_load_report.md"
+        md_path.write_text(
+            "\n".join(
+                [
+                    "# Cloud DEM Load Report",
+                    "",
+                    f"- LAS folder: `{las_dir}`",
+                    f"- LAS files: `{len(las_files)}`",
+                    f"- Source CRS: `{actual_source_crs.to_string()}`",
+                    "- Target CRS: `EPSG:3857`",
+                    f"- Pixel size: `{pixel_size_m} m`",
+                    "- Rasterization rule: minimum `z` per EPSG:3857 cell.",
+                    f"- Cache key: `{cache_key}`",
+                    "- Cache hit: `false`",
+                    f"- Valid cells: `{raster_stats['valid_cells']}`",
+                    f"- Point sample: `{len(sampled_points)}` points",
+                    f"- Runtime: `{source['elapsed_seconds']} s`",
+                    f"- GeoTIFF: `{geotiff_path}`",
+                    f"- Memmap: `{dem_path}`",
+                    f"- Point sample file: `{point_sample_path}`",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = dict(source)
+        payload["bbox"] = self.bbox_dict(bounds)
+        payload["cloud_layer"] = self.fixed_cloud_layer()
+        payload["point_sample"] = self.point_sample
+        payload["report_json"] = str(report_path)
+        payload["report_markdown"] = str(md_path)
+        return payload
 
     def distance_blend(self, cloud: np.ndarray, terrarium: np.ndarray, xs: np.ndarray, ys: np.ndarray, radius: float) -> np.ndarray:
         dist, nearest_z = self.cloud_distance_field(cloud, xs, ys, radius)
@@ -1170,6 +1650,8 @@ class TerrainContext:
         self, terrarium: np.ndarray, xs: np.ndarray, ys: np.ndarray, radius_m: float
     ) -> np.ndarray:
         cloud_xs, cloud_ys, cloud = self.fixed_cloud_arrays()
+        if cloud.size == 0:
+            return terrarium.copy()
         contour = self.cloud_contour_mask(cloud)
         blended = terrarium.copy()
         if not contour.any():
@@ -1249,6 +1731,8 @@ class TerrainContext:
         blur_radius_m: float,
         tessellation_strategy: str = "quadtree",
     ) -> dict[str, Any]:
+        if not self.cloud_loaded:
+            return {"enabled": True, "applied": False, "reason": "Cloud DEM not loaded"}
         if tessellation_strategy == "nvb":
             return self.adaptive_nvb_blend_mesh(xs, ys, terrarium, resolution, radius, blur_radius_m)
         if tessellation_strategy == "diamond48":
@@ -1907,8 +2391,11 @@ class TerrainContext:
             "bbox": {
                 "terrarium_dem": self.bbox_dict(grid["bounds"]),
                 "terrarium_requested": self.bbox_dict(grid["requested_bounds"]),
-                "point_cloud": self.bbox_dict(self.bounds),
+                "point_cloud": self.bbox_dict(self.bounds) if self.bounds is not None else None,
             },
+            "cloud_loaded": bool(self.cloud_loaded),
+            "cloud_source": self.cloud_source,
+            "point_sample": self.point_sample,
             "elapsed_seconds": round(time.perf_counter() - start, 3),
         }
         if refine_blends:
@@ -1951,9 +2438,27 @@ class Handler(BaseHTTPRequestHandler):
                         "description": "Cloud DEM visualization resolution is fixed and independent of Terrarium LoD.",
                     },
                     "default_blur_radius_m": self.context.default_blur_radius_m,
-                    "cloud_bbox": self.context.bbox_dict(self.context.bounds),
+                    "cloud_loaded": self.context.cloud_loaded,
+                    "cloud_bbox": self.context.bbox_dict(self.context.bounds) if self.context.bounds is not None else None,
+                    "cloud_source": self.context.cloud_source,
                 }
             )
+            return
+        if parsed.path == "/api/cloud_dem":
+            query = urllib.parse.parse_qs(parsed.query)
+            las_dir_text = query.get("las_dir", [""])[0].strip()
+            if not las_dir_text:
+                self.send_error(400, "las_dir is required")
+                return
+            source_crs = query.get("source_crs", [self.context.report.get("crs", {}).get("source", "EPSG:32630")])[0]
+            try:
+                pixel_size_m = float(query.get("pixel_size_m", [str(self.context.dem_pixel_size)])[0])
+                chunk_size = int(query.get("chunk_size", ["1000000"])[0])
+                payload = self.context.load_cloud_dem_from_las(Path(las_dir_text), source_crs, pixel_size_m, chunk_size)
+            except Exception as exc:
+                self.send_error(400, str(exc))
+                return
+            self.json_response(payload)
             return
         if parsed.path == "/api/mesh":
             query = urllib.parse.parse_qs(parsed.query)
