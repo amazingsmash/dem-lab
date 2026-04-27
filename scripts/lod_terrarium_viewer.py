@@ -34,11 +34,12 @@ HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LoD Terrarium Blend Viewer</title>
+<title>DEM Lab</title>
 <style>
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111; color: #eee; font-family: Segoe UI, Arial, sans-serif; }
 #gl { width: 100vw; height: 100vh; display: block; }
 #hud { position: fixed; left: 12px; top: 12px; width: 300px; max-height: calc(100vh - 24px); overflow: auto; background: rgba(0,0,0,.78); padding: 10px 12px; border: 1px solid #444; border-radius: 6px; font-size: 13px; line-height: 1.45; }
+#hud h1 { margin: 0 0 10px; font-size: 18px; font-weight: 600; color: #eee; }
 #hud label { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
 #hud select, #hud button, #hud input[type=number] { width: 100%; margin: 6px 0 8px; color: #eee; background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 6px 7px; box-sizing: border-box; }
 #hud button { cursor: pointer; background: #263247; display: flex; align-items: center; justify-content: center; gap: 7px; }
@@ -73,6 +74,8 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
 .modal .bbox-grid label { display: block; margin: 0; }
 .modal select, .modal button, .modal input[type=number], .modal input[type=text] { width: 100%; margin: 6px 0 10px; color: #eee; background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 7px; box-sizing: border-box; }
 .modal button { cursor: pointer; background: #263247; }
+.modal button.accept { background: #1f6f43; border-color: #2f9b61; }
+.modal button.cancel { background: #7a2a2a; border-color: #b04444; }
 .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 .modal-actions button { margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -81,6 +84,7 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
 <body>
 <canvas id="gl"></canvas>
 <div id="hud">
+  <h1>DEM Lab</h1>
   <div id="busy"><span class="spinner"></span><span id="busyText">Waiting for backend...</span></div>
   <label for="mode">Render</label>
   <select id="mode">
@@ -133,8 +137,8 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
     <label for="cloudChunkSize">Chunk size</label>
     <input id="cloudChunkSize" type="number" min="1" step="100000" value="1000000">
     <div class="modal-actions">
-      <button id="acceptCloudSettings">Load</button>
-      <button id="cancelCloudSettings">Cancel</button>
+      <button id="acceptCloudSettings" class="accept">Accept</button>
+      <button id="cancelCloudSettings" class="cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -152,8 +156,8 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
     </div>
     <button id="resetBbox">Use Cloud BBOX</button>
     <div class="modal-actions">
-      <button id="acceptTerrariumSettings">Accept</button>
-      <button id="cancelTerrariumSettings">Cancel</button>
+      <button id="acceptTerrariumSettings" class="accept">Accept</button>
+      <button id="cancelTerrariumSettings" class="cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -176,8 +180,8 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
     <div class="row"><span>Blur R</span><input id="blurRadiusM" type="range" min="0" max="500" step="5" value="160"><span id="blurRadiusMValue"></span></div>
     <label><input id="refineBlends" type="checkbox">Refine blends over cloud</label>
     <div class="modal-actions">
-      <button id="acceptBlendSettings">Accept</button>
-      <button id="cancelBlendSettings">Cancel</button>
+      <button id="acceptBlendSettings" class="accept">Accept</button>
+      <button id="cancelBlendSettings" class="cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -216,6 +220,7 @@ let profileMode = false;
 let profilePoints = [];
 let profileChart = null;
 let profileLineBuffer = null;
+let profileSurfaceCache = null;
 
 function shader(type, source) {
   const s = gl.createShader(type);
@@ -779,6 +784,7 @@ async function loadMesh(forcedLod = null, frameTarget = null) {
     current = data;
     currentTerrainGrid = {xs: data.xs, ys: data.ys, nx: data.nx, ny: data.ny};
     currentCloudGrid = data.cloud_layer;
+    profileSurfaceCache = null;
     appliedBlendSettings = requestedBlendSettings;
     appliedTerrariumSettings = requestedTerrariumSettings;
     if (frameTarget === "cloud" && data.bbox && data.bbox.point_cloud) framePointCloud();
@@ -940,6 +946,119 @@ function sampleGrid(grid, values, x, y) {
   return z00*(1-tx)*(1-ty) + z10*tx*(1-ty) + z01*(1-tx)*ty + z11*tx*ty;
 }
 
+function pointInTriangle(x, y, t) {
+  const ax = t[0], ay = t[1], bx = t[3], by = t[4], cx = t[6], cy = t[7];
+  const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+  if (Math.abs(den) < 1e-12) return null;
+  const w0 = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / den;
+  const w1 = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / den;
+  const w2 = 1 - w0 - w1;
+  const eps = -1e-8;
+  if (w0 < eps || w1 < eps || w2 < eps) return null;
+  return w0 * t[2] + w1 * t[5] + w2 * t[8];
+}
+
+function sampleRegularMesh(grid, values, x, y) {
+  if (!grid || !values || !grid.nx || !grid.ny || grid.nx < 2 || grid.ny < 2) return null;
+  const nx = grid.nx, ny = grid.ny;
+  const dx = Math.abs(grid.xs[1] - grid.xs[0]);
+  const dy = Math.abs(grid.ys[1] - grid.ys[0]);
+  const col = Math.floor((x - grid.xs[0]) / dx);
+  const row = Math.floor((grid.ys[0] - y) / dy);
+  if (col < 0 || row < 0 || col >= nx - 1 || row >= ny - 1) return null;
+  const idx = (r, c) => r * nx + c;
+  const a = [grid.xs[col], grid.ys[row], values[idx(row, col)]];
+  const b = [grid.xs[col + 1], grid.ys[row], values[idx(row, col + 1)]];
+  const c = [grid.xs[col], grid.ys[row + 1], values[idx(row + 1, col)]];
+  const d = [grid.xs[col + 1], grid.ys[row + 1], values[idx(row + 1, col + 1)]];
+  const tri1 = [a, c, b];
+  const tri2 = [b, c, d];
+  for (const tri of [tri1, tri2]) {
+    if (!tri.every(p => finite(p[2]))) continue;
+    const z = pointInTriangle(x, y, [tri[0][0], tri[0][1], tri[0][2], tri[1][0], tri[1][1], tri[1][2], tri[2][0], tri[2][1], tri[2][2]]);
+    if (finite(z)) return z;
+  }
+  return null;
+}
+
+function refinedLayerId() {
+  const strategy = blendStrategy();
+  if (strategy === "naive") return "cloud_replacement";
+  if (strategy === "blur") return "blur_blend";
+  if (strategy === "vertical_distance") return "vertical_distance_blend";
+  return "distance_blend";
+}
+
+function trianglesFromRefinedLayer(layer, geometry) {
+  const triangles = [];
+  if (!layer) return triangles;
+  if (geometry === "triangles") {
+    for (const t of layer.triangles || []) {
+      triangles.push([t[0], t[1], t[6], t[2], t[3], t[7], t[4], t[5], t[8]]);
+    }
+  } else {
+    for (const q of layer.quads || []) {
+      const a = [q[0], q[1], q[4]], b = [q[2], q[1], q[5]], c = [q[0], q[3], q[6]], d = [q[2], q[3], q[7]];
+      triangles.push([a[0], a[1], a[2], c[0], c[1], c[2], b[0], b[1], b[2]]);
+      triangles.push([b[0], b[1], b[2], c[0], c[1], c[2], d[0], d[1], d[2]]);
+    }
+  }
+  return triangles;
+}
+
+function buildTriangleIndex(triangles) {
+  if (!triangles.length) return null;
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const t of triangles) {
+    minx = Math.min(minx, t[0], t[3], t[6]); maxx = Math.max(maxx, t[0], t[3], t[6]);
+    miny = Math.min(miny, t[1], t[4], t[7]); maxy = Math.max(maxy, t[1], t[4], t[7]);
+  }
+  const bins = 64, cells = Array.from({length: bins * bins}, () => []);
+  const sx = bins / Math.max(maxx - minx, 1e-9), sy = bins / Math.max(maxy - miny, 1e-9);
+  function clamp(v) { return Math.max(0, Math.min(bins - 1, v)); }
+  triangles.forEach((t, i) => {
+    const tminx = Math.min(t[0], t[3], t[6]), tmaxx = Math.max(t[0], t[3], t[6]);
+    const tminy = Math.min(t[1], t[4], t[7]), tmaxy = Math.max(t[1], t[4], t[7]);
+    const c0 = clamp(Math.floor((tminx - minx) * sx)), c1 = clamp(Math.floor((tmaxx - minx) * sx));
+    const r0 = clamp(Math.floor((tminy - miny) * sy)), r1 = clamp(Math.floor((tmaxy - miny) * sy));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) cells[r * bins + c].push(i);
+  });
+  return {triangles, minx, miny, maxx, maxy, bins, cells, sx, sy};
+}
+
+function sampleTriangleIndex(index, x, y) {
+  if (!index || x < index.minx || x > index.maxx || y < index.miny || y > index.maxy) return null;
+  const c = Math.max(0, Math.min(index.bins - 1, Math.floor((x - index.minx) * index.sx)));
+  const r = Math.max(0, Math.min(index.bins - 1, Math.floor((y - index.miny) * index.sy)));
+  for (const i of index.cells[r * index.bins + c]) {
+    const z = pointInTriangle(x, y, index.triangles[i]);
+    if (finite(z)) return z;
+  }
+  return null;
+}
+
+function profileSurfaces() {
+  if (profileSurfaceCache) return profileSurfaceCache;
+  const refined = current.refined_mesh && current.refined_mesh.applied;
+  let blended = {type: "regular", grid: currentTerrainGrid, values: currentBlendValues()};
+  if (refined) {
+    const layer = current.refined_mesh.layers[refinedLayerId()];
+    blended = {type: "indexed", index: buildTriangleIndex(trianglesFromRefinedLayer(layer, current.refined_mesh.geometry))};
+  }
+  profileSurfaceCache = {
+    terrarium: {type: "regular", grid: currentTerrainGrid, values: current.terrarium},
+    cloud: {type: "regular", grid: currentCloudGrid, values: currentCloudGrid.z},
+    blended
+  };
+  return profileSurfaceCache;
+}
+
+function sampleSurface(surface, x, y) {
+  if (!surface) return null;
+  if (surface.type === "indexed") return sampleTriangleIndex(surface.index, x, y);
+  return sampleRegularMesh(surface.grid, surface.values, x, y);
+}
+
 function buildProfileSamples(a, b) {
   const distance = Math.hypot(b.x - a.x, b.y - a.y);
   const sampleStepM = 0.5;
@@ -947,18 +1066,15 @@ function buildProfileSamples(a, b) {
   const terrarium = [];
   const cloud = [];
   const blended = [];
-  const blendValues = currentBlendValues();
+  const surfaces = profileSurfaces();
   for (let i = 0; i <= steps; i++) {
     const t = i / steps;
     const x = a.x + (b.x - a.x) * t;
     const y = a.y + (b.y - a.y) * t;
     const d = distance * t;
-    const cloudZ = sampleGrid(currentCloudGrid, currentCloudGrid.z, x, y);
-    let blendedZ = sampleGrid(currentTerrainGrid, blendValues, x, y);
-    if (finite(cloudZ)) blendedZ = cloudZ;
-    terrarium.push({x: d, y: sampleGrid(currentTerrainGrid, current.terrarium, x, y)});
-    cloud.push({x: d, y: cloudZ});
-    blended.push({x: d, y: blendedZ});
+    terrarium.push({x: d, y: sampleSurface(surfaces.terrarium, x, y)});
+    cloud.push({x: d, y: sampleSurface(surfaces.cloud, x, y)});
+    blended.push({x: d, y: sampleSurface(surfaces.blended, x, y)});
   }
   return {distance, terrarium, cloud, blended};
 }
