@@ -60,6 +60,11 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
 #busy { display: none; align-items: center; gap: 8px; margin: 8px 0; color: #f2c94c; }
 #busy.active { display: flex; }
 .spinner { width: 14px; height: 14px; border: 2px solid #555; border-top-color: #f2c94c; border-radius: 50%; animation: spin .8s linear infinite; }
+#profilePanel { position: fixed; left: 320px; right: 12px; bottom: 12px; height: 230px; display: none; background: rgba(0,0,0,.82); border: 1px solid #444; border-radius: 6px; padding: 10px 12px; z-index: 4; }
+#profilePanel.active { display: block; }
+#profileHeader { display: flex; align-items: center; justify-content: space-between; color: #eee; font-size: 13px; margin-bottom: 6px; }
+#profileHeader button { width: 28px; height: 24px; color: #eee; background: #263247; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+#profileChart { width: 100%; height: 190px; }
 .modal-backdrop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.58); z-index: 10; }
 .modal-backdrop.active { display: flex; }
 .modal { width: min(420px, calc(100vw - 28px)); max-height: calc(100vh - 28px); overflow: auto; color: #eee; background: #151515; border: 1px solid #555; border-radius: 6px; box-shadow: 0 18px 60px rgba(0,0,0,.48); padding: 14px; }
@@ -83,6 +88,7 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
     <option value="flat">Flat shading</option>
     <option value="phong">Phong shading</option>
   </select>
+  <button id="profileTool">Profile Tool</button>
   <details open>
     <summary>Layers</summary>
     <div class="layer-line">
@@ -110,6 +116,10 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
   </details>
   <div id="meta" class="status">Loading metadata...</div>
   <div class="hint">drag: rotate | wheel: zoom | shift+drag: pan</div>
+</div>
+<div id="profilePanel">
+  <div id="profileHeader"><span id="profileTitle">Terrain profile</span><button id="closeProfile" aria-label="Close profile">x</button></div>
+  <canvas id="profileChart"></canvas>
 </div>
 <div id="cloudModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cloudModalTitle">
   <div class="modal">
@@ -171,6 +181,7 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
     </div>
   </div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <script>
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl", {antialias: true});
@@ -201,6 +212,10 @@ let appliedCloudSettings = {
   pixelSizeM: 0.5,
   chunkSize: 1000000
 };
+let profileMode = false;
+let profilePoints = [];
+let profileChart = null;
+let profileLineBuffer = null;
 
 function shader(type, source) {
   const s = gl.createShader(type);
@@ -818,13 +833,14 @@ async function loadCloudDem() {
 }
 
 let yaw = -0.7, pitch = 0.8, dist = 2.1, panX = 0, panY = 0;
-let dragging = false, lastX = 0, lastY = 0, panning = false;
-canvas.addEventListener("mousedown", e => { dragging = true; panning = e.shiftKey; lastX = e.clientX; lastY = e.clientY; });
+let dragging = false, lastX = 0, lastY = 0, panning = false, dragMoved = false;
+canvas.addEventListener("mousedown", e => { dragging = true; dragMoved = false; panning = e.shiftKey; lastX = e.clientX; lastY = e.clientY; });
 window.addEventListener("mouseup", () => dragging = false);
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
   const dx = e.clientX - lastX, dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
+  if (Math.hypot(dx, dy) > 2) dragMoved = true;
   if (panning) { panX += dx / canvas.clientWidth * dist; panY -= dy / canvas.clientHeight * dist; }
   else { yaw += dx * 0.008; pitch = Math.max(-1.45, Math.min(1.45, pitch + dy * 0.008)); }
 });
@@ -845,6 +861,163 @@ function sunDirection() {
 }
 for (const id of ["blurRadiusM", "sunAzimuth", "sunElevation", "ambient", "specular"]) document.getElementById(id).addEventListener("input", updateSliderLabels);
 updateSliderLabels();
+
+function matInv(m) {
+  const inv = new Float32Array(16);
+  inv[0] = m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+  inv[4] = -m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+  inv[8] = m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+  inv[12] = -m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+  inv[1] = -m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+  inv[5] = m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+  inv[9] = -m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+  inv[13] = m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+  inv[2] = m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+  inv[6] = -m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+  inv[10] = m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+  inv[14] = -m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+  inv[3] = -m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+  inv[7] = m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+  inv[11] = -m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+  inv[15] = m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+  let det = m[0]*inv[0]+m[1]*inv[4]+m[2]*inv[8]+m[3]*inv[12];
+  if (!det) return null;
+  det = 1.0 / det;
+  for (let i = 0; i < 16; i++) inv[i] *= det;
+  return inv;
+}
+
+function transform4(m, v) {
+  return [
+    m[0]*v[0]+m[4]*v[1]+m[8]*v[2]+m[12]*v[3],
+    m[1]*v[0]+m[5]*v[1]+m[9]*v[2]+m[13]*v[3],
+    m[2]*v[0]+m[6]*v[1]+m[10]*v[2]+m[14]*v[3],
+    m[3]*v[0]+m[7]*v[1]+m[11]*v[2]+m[15]*v[3]
+  ];
+}
+
+function currentMvp() {
+  const aspect = canvas.width / Math.max(canvas.height, 1);
+  const eye = [Math.sin(yaw)*Math.cos(pitch)*dist + panX, Math.sin(pitch)*dist + panY, Math.cos(yaw)*Math.cos(pitch)*dist];
+  const center = [panX, panY, 0];
+  return matMul(perspective(Math.PI/4, aspect, 0.01, 100), lookAt(eye, center, [0,1,0]));
+}
+
+function screenToMapPoint(e) {
+  resize();
+  const rect = canvas.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  const y = 1 - ((e.clientY - rect.top) / rect.height) * 2;
+  const inv = matInv(currentMvp());
+  if (!inv) return null;
+  const near = transform4(inv, [x, y, -1, 1]);
+  const far = transform4(inv, [x, y, 1, 1]);
+  for (const p of [near, far]) { p[0] /= p[3]; p[1] /= p[3]; p[2] /= p[3]; }
+  const dy = far[1] - near[1];
+  if (Math.abs(dy) < 1e-8) return null;
+  const t = -near[1] / dy;
+  const nx = near[0] + (far[0] - near[0]) * t;
+  const nz = near[2] + (far[2] - near[2]) * t;
+  return {x: nx * scene.extent + scene.cx, y: nz * scene.extent + scene.cy};
+}
+
+function sampleGrid(grid, values, x, y) {
+  if (!grid || !values || !grid.nx || !grid.ny || grid.nx < 1 || grid.ny < 1) return null;
+  const nx = grid.nx, ny = grid.ny;
+  const dx = nx > 1 ? Math.abs(grid.xs[1] - grid.xs[0]) : 1;
+  const dy = ny > 1 ? Math.abs(grid.ys[1] - grid.ys[0]) : dx;
+  const col = (x - grid.xs[0]) / dx;
+  const row = (grid.ys[0] - y) / dy;
+  if (col < 0 || row < 0 || col > nx - 1 || row > ny - 1) return null;
+  const c0 = Math.floor(col), r0 = Math.floor(row);
+  const c1 = Math.min(nx - 1, c0 + 1), r1 = Math.min(ny - 1, r0 + 1);
+  const tx = col - c0, ty = row - r0;
+  const idx = (r, c) => r * nx + c;
+  const z00 = values[idx(r0, c0)], z10 = values[idx(r0, c1)], z01 = values[idx(r1, c0)], z11 = values[idx(r1, c1)];
+  const valid = [z00, z10, z01, z11].filter(finite);
+  if (!valid.length) return null;
+  if (![z00, z10, z01, z11].every(finite)) return valid.reduce((a, b) => a + b, 0) / valid.length;
+  return z00*(1-tx)*(1-ty) + z10*tx*(1-ty) + z01*(1-tx)*ty + z11*tx*ty;
+}
+
+function buildProfileSamples(a, b) {
+  const distance = Math.hypot(b.x - a.x, b.y - a.y);
+  const sampleStepM = 0.5;
+  const steps = Math.max(1, Math.ceil(distance / sampleStepM));
+  const terrarium = [];
+  const cloud = [];
+  const blended = [];
+  const blendValues = currentBlendValues();
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = a.x + (b.x - a.x) * t;
+    const y = a.y + (b.y - a.y) * t;
+    const d = distance * t;
+    const cloudZ = sampleGrid(currentCloudGrid, currentCloudGrid.z, x, y);
+    let blendedZ = sampleGrid(currentTerrainGrid, blendValues, x, y);
+    if (finite(cloudZ)) blendedZ = cloudZ;
+    terrarium.push({x: d, y: sampleGrid(currentTerrainGrid, current.terrarium, x, y)});
+    cloud.push({x: d, y: cloudZ});
+    blended.push({x: d, y: blendedZ});
+  }
+  return {distance, terrarium, cloud, blended};
+}
+
+function updateProfileChart() {
+  if (!current || profilePoints.length !== 2) return;
+  if (!window.Chart) {
+    metaEl.textContent = "Chart.js is not available; profile chart cannot be rendered.";
+    return;
+  }
+  const profile = buildProfileSamples(profilePoints[0], profilePoints[1]);
+  document.getElementById("profilePanel").classList.add("active");
+  document.getElementById("profileTitle").textContent = `Terrain profile | ${(profile.distance).toFixed(1)} m`;
+  const ctx = document.getElementById("profileChart");
+  const datasets = [
+    {label: "Terrarium DEM", data: profile.terrarium, borderColor: "#4aa3ff", backgroundColor: "#4aa3ff"},
+    {label: "Cloud DEM", data: profile.cloud, borderColor: "#ff4a4a", backgroundColor: "#ff4a4a"},
+    {label: "Blended DEM", data: profile.blended, borderColor: "#f2c94c", backgroundColor: "#f2c94c"}
+  ].map(ds => ({...ds, showLine: true, spanGaps: true, pointRadius: 0, pointHoverRadius: 0, borderWidth: 2, tension: 0}));
+  if (profileChart) profileChart.destroy();
+  profileChart = new Chart(ctx, {
+    type: "scatter",
+    data: {datasets},
+    options: {
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      scales: {
+        x: {type: "linear", title: {display: true, text: "Distance (m)", color: "#ddd"}, ticks: {color: "#ccc"}, grid: {color: "rgba(255,255,255,.12)"}},
+        y: {title: {display: true, text: "Elevation (m)", color: "#ddd"}, ticks: {color: "#ccc"}, grid: {color: "rgba(255,255,255,.12)"}}
+      },
+      plugins: {legend: {labels: {color: "#ddd"}}}
+    }
+  });
+}
+
+function profileLineMesh() {
+  if (profilePoints.length !== 2 || !current) return null;
+  const points = profilePoints.map(p => {
+    const z = sampleGrid(currentTerrainGrid, currentBlendValues(), p.x, p.y);
+    return [(p.x - scene.cx) / scene.extent, ((finite(z) ? z : scene.cz) - scene.cz + 2.0) * 3.0 / scene.extent, (p.y - scene.cy) / scene.extent];
+  });
+  if (!profileLineBuffer) profileLineBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, profileLineBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([...points[0], ...points[1]]), gl.DYNAMIC_DRAW);
+  return {lineBuffer: profileLineBuffer, lineCount: 2};
+}
+
+function handleProfileClick(e) {
+  if (!profileMode || !current) return;
+  if (dragMoved) return;
+  e.preventDefault();
+  const point = screenToMapPoint(e);
+  if (!point) return;
+  if (profilePoints.length >= 2) profilePoints = [];
+  profilePoints.push(point);
+  if (profilePoints.length === 2) updateProfileChart();
+  else metaEl.textContent = "Profile tool: click the second point.";
+}
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
@@ -916,8 +1089,11 @@ function render() {
     else if (mode === "flat") drawFlat(layer, mvp);
     else drawWire(layer, mvp);
   }
+  const profileLine = profileLineMesh();
+  if (profileLine) drawWire({mesh: profileLine, color: [0.32, 0.95, 0.45]}, mvp);
   requestAnimationFrame(render);
 }
+canvas.addEventListener("click", handleProfileClick);
 document.getElementById("frameCloud").addEventListener("click", framePointCloud);
 document.getElementById("frameTerrarium").addEventListener("click", frameTerrarium);
 document.getElementById("openCloudSettings").addEventListener("click", openCloudModal);
@@ -970,6 +1146,20 @@ document.getElementById("blendModal").addEventListener("click", e => {
 });
 document.getElementById("resetBbox").addEventListener("click", () => {
   resetBboxToCloud();
+});
+document.getElementById("profileTool").addEventListener("click", () => {
+  profileMode = !profileMode;
+  profilePoints = [];
+  document.getElementById("profileTool").textContent = profileMode ? "Profile Tool: On" : "Profile Tool";
+  metaEl.textContent = profileMode ? "Profile tool: click the first point." : "Profile tool disabled.";
+});
+document.getElementById("closeProfile").addEventListener("click", () => {
+  document.getElementById("profilePanel").classList.remove("active");
+  profilePoints = [];
+  if (profileChart) {
+    profileChart.destroy();
+    profileChart = null;
+  }
 });
 loadInfo().then(() => loadMesh(INITIAL_LOD, "terrarium"));
 render();
@@ -1583,6 +1773,19 @@ class TerrainContext:
         blended[valid] = cloud[valid]
         return blended
 
+    def sample_regular_grid(self, values: np.ndarray, xs: np.ndarray, ys: np.ndarray, x: float, y: float) -> float:
+        if values.size == 0 or len(xs) == 0 or len(ys) == 0:
+            return float("nan")
+        ny, nx = values.shape
+        res_x = self.cloud_resolution_m if nx == 1 else abs(float(xs[1] - xs[0]))
+        res_y = self.cloud_resolution_m if ny == 1 else abs(float(ys[1] - ys[0]))
+        col = int(round((x - float(xs[0])) / res_x))
+        row = int(round((float(ys[0]) - y) / res_y))
+        if row < 0 or row >= ny or col < 0 or col >= nx:
+            return float("nan")
+        value = float(values[row, col])
+        return value if np.isfinite(value) else float("nan")
+
     def cloud_contour_mask(self, cloud: np.ndarray) -> np.ndarray:
         valid = np.isfinite(cloud)
         contour = np.zeros(valid.shape, dtype=bool)
@@ -1608,6 +1811,9 @@ class TerrainContext:
         contour: np.ndarray,
         radius_m: float,
     ) -> float:
+        cloud_z = self.sample_regular_grid(cloud, cloud_xs, cloud_ys, x, y)
+        if np.isfinite(cloud_z):
+            return cloud_z
         if radius_m <= 0.0:
             return float(terrarium_z)
         res_x = self.cloud_resolution_m if len(cloud_xs) == 1 else abs(float(cloud_xs[1] - cloud_xs[0]))
@@ -2386,7 +2592,7 @@ class TerrainContext:
             "blur_radius_m": blur_radius,
             "blend_formula": "Horizontal Distance: If Cloud DEM is defined, z=cloud_z. Otherwise t=clamp(d_horizontal/R,0,1), w=0.5*(1+cos(pi*t)), z=w*z_nearest_cloud+(1-w)*z_terrarium.",
             "vertical_blend_formula": "Vertical Distance: If Cloud DEM is defined, z=cloud_z. Otherwise use the horizontally nearest valid Cloud DEM value, t=clamp(abs(z_nearest_cloud-z_terrarium)/R,0,1), w=0.5*(1+cos(pi*t)), z=w*z_nearest_cloud+(1-w)*z_terrarium.",
-            "blur_formula": "For each final DEM vertex, collect valid Cloud DEM contour points within R meters. For each contour point, W=0.5*(1+cos(pi*d_m/R)). Then w_avg=mean(W), z_contour_avg=sum(W*z_contour)/sum(W), and z=w_avg*z_contour_avg+(1-w_avg)*z_terrarium.",
+            "blur_formula": "If Cloud DEM is defined, z=cloud_z. Otherwise collect valid Cloud DEM contour points within R meters. For each contour point, W=0.5*(1+cos(pi*d_m/R)). Then w_avg=mean(W), z_contour_avg=sum(W*z_contour)/sum(W), and z=w_avg*z_contour_avg+(1-w_avg)*z_terrarium.",
             "tiles": grid["tiles"],
             "bbox": {
                 "terrarium_dem": self.bbox_dict(grid["bounds"]),
