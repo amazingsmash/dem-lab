@@ -1,58 +1,58 @@
 # dem-lab
 
-Laboratorio de investigacion para generar, comparar y visualizar modelos de elevacion derivados de nubes de puntos LAS y teselas Terrarium.
+Research lab for generating, comparing, and visualizing elevation models derived from LAS point clouds and Terrarium tiles.
 
-## Objetivo
+## Purpose
 
-El repositorio contiene scripts reproducibles para:
+This repository contains reproducible scripts to:
 
-- Rasterizar archivos LAS como un DEM de minima elevacion por celda.
-- Comparar el DEM local contra elevacion Terrarium en `EPSG:3857`.
-- Registrar cada ejecucion con reportes Markdown y JSON.
-- Preparar visores WebGL para inspeccionar mallas, mezclas y niveles de detalle.
+- Rasterize LAS files as a minimum-elevation-per-cell DEM.
+- Compare the local DEM against Terrarium elevation in `EPSG:3857`.
+- Log each run with Markdown and JSON reports.
+- Prepare WebGL viewers for inspecting meshes, blends, and levels of detail.
 
-## Supuestos geoespaciales
+## Geospatial Assumptions
 
-- CRS de entrada por defecto: `EPSG:32628`, usado solo cuando los encabezados LAS no incluyen CRS.
-- CRS de salida por defecto: `EPSG:3857`.
-- Resolucion DEM por defecto: `0.5 m`.
-- Regla de rasterizacion: minimo `z` de los puntos que caen dentro de cada celda.
-- Mascara de validez: celdas con valores finitos en el DEM de nube.
-- Comparacion contra Terrarium: muestreo bilineal de Terrarium en el centro de cada pixel valido del DEM local.
-- Diferencia reportada: `cloud_min_z_m - terrarium_elevation_m`.
+- Default input CRS: `EPSG:32628`, used only when LAS headers do not include a CRS.
+- Default output CRS: `EPSG:3857`.
+- Default DEM resolution: `0.5 m`.
+- Rasterization rule: minimum `z` from the points that fall inside each cell.
+- Validity mask: cells with finite values in the cloud DEM.
+- Comparison against Terrarium: bilinear Terrarium sampling at the center of each valid pixel in the local DEM.
+- Reported difference: `cloud_min_z_m - terrarium_elevation_m`.
 
-## Estructura
+## Structure
 
 ```text
 scripts/
-  build_dem_terrarium_experiment.py  # experimento principal y registro de artefactos
-  viewer_wiremesh.py                 # visor WebGL estatico desde viewer_meshes.json
-  lod_terrarium_viewer.py            # servidor local con LoD, mezclas y refinamiento
-launch_lod_viewer.bat                # lanzador Windows del visor LoD
-outputs/                             # salidas generadas, ignoradas por git
+  build_dem_terrarium_experiment.py  # main experiment and artifact logging
+  viewer_wiremesh.py                 # static WebGL viewer from viewer_meshes.json
+  lod_terrarium_viewer.py            # local server with LoD, blends, and refinement
+launch_lod_viewer.bat                # Windows launcher for the LoD viewer
+outputs/                             # generated outputs, ignored by git
 ```
 
-Los datos originales y artefactos pesados estan excluidos de git mediante `.gitignore`. Las salidas deben escribirse en carpetas de resultados como `outputs/`, `results/` o `runs/`.
+Original data and heavy artifacts are excluded from git through `.gitignore`. Outputs must be written to result folders such as `outputs/`, `results/`, or `runs/`.
 
-## Dependencias
+## Dependencies
 
-Python 3.10+ recomendado.
+Python 3.10+ is recommended.
 
 ```powershell
 python -m pip install laspy numpy requests pillow pyproj rasterio
 ```
 
-`lod_terrarium_viewer.py` y `build_dem_terrarium_experiment.py` descargan teselas Terrarium desde `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/`, por lo que requieren acceso de red durante esas etapas.
+`lod_terrarium_viewer.py` and `build_dem_terrarium_experiment.py` download Terrarium tiles from `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/`, so they require network access during those stages.
 
-## Experimento DEM vs Terrarium
+## DEM vs Terrarium Experiment
 
-Ejemplo con valores por defecto:
+Example using default values:
 
 ```powershell
 python scripts\build_dem_terrarium_experiment.py
 ```
 
-Ejemplo declarando entradas y salidas:
+Example declaring inputs and outputs:
 
 ```powershell
 python scripts\build_dem_terrarium_experiment.py `
@@ -65,26 +65,26 @@ python scripts\build_dem_terrarium_experiment.py `
   --viewer-max-cells 240
 ```
 
-Salidas principales:
+Main outputs:
 
-- `cloud_minz_3857_0p5m.float32.memmap`: raster temporal de minimo `z`.
-- `cloud_minz_3857_0p5m.tif`: DEM local en GeoTIFF.
-- `cloud_minz_3857_0p5m_preview.png`: previsualizacion raster.
-- `terrarium_covering_tile.png`: tesela Terrarium descargada.
-- `terrarium_covering_tile_3857.tif`: Terrarium decodificado como GeoTIFF.
-- `viewer_meshes.json`: mallas simplificadas para visualizacion.
-- `experiment_report.md`: reporte trazable del experimento.
-- `experiment_report.json`: registro estructurado de parametros, tiempos, errores, rutas y metricas.
+- `cloud_minz_3857_0p5m.float32.memmap`: temporary minimum-`z` raster.
+- `cloud_minz_3857_0p5m.tif`: local DEM as GeoTIFF.
+- `cloud_minz_3857_0p5m_preview.png`: raster preview.
+- `terrarium_covering_tile.png`: downloaded Terrarium tile.
+- `terrarium_covering_tile_3857.tif`: Terrarium decoded as GeoTIFF.
+- `viewer_meshes.json`: simplified meshes for visualization.
+- `experiment_report.md`: traceable experiment report.
+- `experiment_report.json`: structured record of parameters, runtimes, errors, paths, and metrics.
 
-Para recomputar salidas existentes:
+To recompute existing outputs:
 
 ```powershell
 python scripts\build_dem_terrarium_experiment.py --force
 ```
 
-## Visores
+## Viewers
 
-Generar un visor WebGL estatico desde `viewer_meshes.json`:
+Generate a static WebGL viewer from `viewer_meshes.json`:
 
 ```powershell
 python scripts\viewer_wiremesh.py `
@@ -93,7 +93,7 @@ python scripts\viewer_wiremesh.py `
   --open
 ```
 
-Ejecutar el visor LoD local:
+Run the local LoD viewer:
 
 ```powershell
 python scripts\lod_terrarium_viewer.py `
@@ -105,20 +105,20 @@ python scripts\lod_terrarium_viewer.py `
   --open
 ```
 
-En Windows tambien se puede usar:
+On Windows, this can also be used:
 
 ```powershell
 .\launch_lod_viewer.bat 8765
 ```
 
-## Trazabilidad requerida
+## Required Traceability
 
-Cada experimento debe conservar:
+Each experiment must preserve:
 
-- Objetivo, supuestos, entradas, salidas y parametros.
-- CRS de entrada detectado o asumido y CRS de salida.
-- Resolucion, regla de agregacion y mascara de validez.
-- Numero de muestras, formula de metricas y rutas de artefactos.
-- Tiempos de ejecucion, advertencias, errores y versiones de dependencias cuando sean relevantes.
+- Purpose, assumptions, inputs, outputs, and parameters.
+- Detected or assumed input CRS and output CRS.
+- Resolution, aggregation rule, and validity mask.
+- Number of samples, metric formulas, and artifact paths.
+- Runtime, warnings, errors, and dependency versions when relevant.
 
-No se procesan subcarpetas salvo que el experimento lo declare de forma explicita. No se modifican datos originales; los scripts deben escribir resultados nuevos dentro del workspace.
+Subfolders are not processed unless the experiment explicitly declares it. Original data is not modified; scripts must write new results inside the workspace.

@@ -1,0 +1,61 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.*
+*.local
+
+# Research outputs and generated artifacts
+outputs/
+results/
+runs/
+logs/
+tmp/
+temp/
+
+# Geospatial and elevation data
+data/
+raw/
+intermediate/
+*.tif
+*.tiff
+*.vrt
+*.ovr
+*.aux.xml
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.geojson
+*.las
+*.laz
+*.ply
+*.xyz
+*.asc
+*.hgt
+*.dem
+
+# Large numeric/model artifacts
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
