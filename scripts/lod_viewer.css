@@ -1,0 +1,44 @@
+﻿html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111; color: #eee; font-family: Segoe UI, Arial, sans-serif; }
+#gl { width: 100vw; height: 100vh; display: block; }
+#hud { position: fixed; left: 12px; top: 12px; width: 300px; max-height: calc(100vh - 24px); overflow: auto; background: rgba(0,0,0,.78); padding: 10px 12px; border: 1px solid #444; border-radius: 6px; font-size: 13px; line-height: 1.45; }
+#hud h1 { margin: 0 0 10px; font-size: 18px; font-weight: 600; color: #eee; }
+#hud label { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+#hud select, #hud button, #hud input[type=number] { width: 100%; margin: 6px 0 8px; color: #eee; background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 6px 7px; box-sizing: border-box; }
+#hud button { cursor: pointer; background: #263247; display: flex; align-items: center; justify-content: center; gap: 7px; }
+#hud button:disabled { opacity: .55; cursor: wait; }
+#hud input[type=range] { width: 100%; }
+#hud details { margin: 8px 0; }
+#hud summary { cursor: pointer; user-select: none; }
+.layer-line { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+.layer-line label { margin: 0; flex: 1; }
+.icon-button { width: 30px !important; height: 28px; margin: 0 !important; padding: 0 !important; font-size: 17px; line-height: 1; }
+.row { display: grid; grid-template-columns: 82px 1fr 44px; gap: 8px; align-items: center; margin: 6px 0; }
+.bbox-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; }
+.bbox-grid label { display: block; margin: 0; }
+.bbox-grid span { display: block; color: #bbb; font-size: 12px; margin-bottom: -2px; }
+.swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.blue { background: #4aa3ff; } .red { background: #ff4a4a; } .green { background: #52d273; } .yellow { background: #f2c94c; }
+.hint { color: #bbb; margin-top: 8px; }
+.status { color: #ddd; white-space: pre-wrap; }
+#busy { display: none; align-items: center; gap: 8px; margin: 8px 0; color: #f2c94c; }
+#busy.active { display: flex; }
+.spinner { width: 14px; height: 14px; border: 2px solid #555; border-top-color: #f2c94c; border-radius: 50%; animation: spin .8s linear infinite; }
+#profilePanel { position: fixed; left: 320px; right: 12px; bottom: 12px; height: 230px; display: none; background: rgba(0,0,0,.82); border: 1px solid #444; border-radius: 6px; padding: 10px 12px; z-index: 4; }
+#profilePanel.active { display: block; }
+#profileHeader { display: flex; align-items: center; justify-content: space-between; color: #eee; font-size: 13px; margin-bottom: 6px; }
+#profileHeader button { width: 28px; height: 24px; color: #eee; background: #263247; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+#profileChart { width: 100%; height: 190px; }
+.modal-backdrop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.58); z-index: 10; }
+.modal-backdrop.active { display: flex; }
+.modal { width: min(420px, calc(100vw - 28px)); max-height: calc(100vh - 28px); overflow: auto; color: #eee; background: #151515; border: 1px solid #555; border-radius: 6px; box-shadow: 0 18px 60px rgba(0,0,0,.48); padding: 14px; }
+.modal h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.modal label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.modal .bbox-grid label { display: block; margin: 0; }
+.modal select, .modal button, .modal input[type=number], .modal input[type=text] { width: 100%; margin: 6px 0 10px; color: #eee; background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 7px; box-sizing: border-box; }
+.modal button { cursor: pointer; background: #263247; }
+.modal button.accept { background: #1f6f43; border-color: #2f9b61; }
+.modal button.cancel { background: #7a2a2a; border-color: #b04444; }
+.modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.modal-actions button { margin: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+

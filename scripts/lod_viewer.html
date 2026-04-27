@@ -1,0 +1,117 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DEM Lab</title>
+<link rel="stylesheet" href="/lod_viewer.css">
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud">
+  <h1>DEM Lab</h1>
+  <div id="busy"><span class="spinner"></span><span id="busyText">Waiting for backend...</span></div>
+  <label for="mode">Render</label>
+  <select id="mode">
+    <option value="wire">Wireframe</option>
+    <option value="flat">Flat shading</option>
+    <option value="phong">Phong shading</option>
+  </select>
+  <button id="profileTool">Profile Tool</button>
+  <details open>
+    <summary>Layers</summary>
+    <div class="layer-line">
+      <label><input id="showTerrarium" type="checkbox" checked><span class="swatch blue"></span>Terrarium</label>
+      <button id="frameTerrarium" class="icon-button" title="Frame Terrarium DEM" aria-label="Frame Terrarium DEM">&#128247;</button>
+      <button id="openTerrariumSettings" class="icon-button" title="Terrarium settings" aria-label="Terrarium settings">&#9881;</button>
+    </div>
+    <div class="layer-line">
+      <label><input id="showCloud" type="checkbox"><span class="swatch red"></span>Cloud DEM</label>
+      <button id="frameCloud" class="icon-button" title="Frame Point Cloud" aria-label="Frame Point Cloud">&#128247;</button>
+      <button id="openCloudSettings" class="icon-button" title="Cloud DEM settings" aria-label="Cloud DEM settings">&#9881;</button>
+    </div>
+    <label><input id="showPointCloud" type="checkbox"><span class="swatch green"></span>Point Cloud</label>
+    <div class="layer-line">
+      <label><input id="showBlended" type="checkbox"><span class="swatch yellow"></span>Blended DEM</label>
+      <button id="openBlendSettings" class="icon-button" title="Blending settings" aria-label="Blending settings">&#9881;</button>
+    </div>
+  </details>
+  <details open>
+    <summary>Sun</summary>
+    <div class="row"><span>Azimuth</span><input id="sunAzimuth" type="range" min="0" max="360" value="315"><span id="sunAzimuthValue"></span></div>
+    <div class="row"><span>Elevation</span><input id="sunElevation" type="range" min="1" max="89" value="45"><span id="sunElevationValue"></span></div>
+    <div class="row"><span>Ambient</span><input id="ambient" type="range" min="0" max="80" value="28"><span id="ambientValue"></span></div>
+    <div class="row"><span>Specular</span><input id="specular" type="range" min="0" max="80" value="18"><span id="specularValue"></span></div>
+  </details>
+  <div id="meta" class="status">Loading metadata...</div>
+  <div class="hint">drag: rotate | wheel: zoom | shift+drag: pan</div>
+</div>
+<div id="profilePanel">
+  <div id="profileHeader"><span id="profileTitle">Terrain profile</span><button id="closeProfile" aria-label="Close profile">x</button></div>
+  <canvas id="profileChart"></canvas>
+</div>
+<div id="cloudModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cloudModalTitle">
+  <div class="modal">
+    <h2 id="cloudModalTitle">Cloud DEM Settings</h2>
+    <label for="cloudLasDir">LAS folder</label>
+    <input id="cloudLasDir" type="text" placeholder="E:\path\to\las_folder">
+    <label for="cloudSourceCrs">Source CRS when LAS has no CRS</label>
+    <input id="cloudSourceCrs" type="text" value="EPSG:32630">
+    <label for="cloudPixelSize">DEM pixel size (m)</label>
+    <input id="cloudPixelSize" type="number" min="0.01" step="0.01" value="0.5">
+    <label for="cloudChunkSize">Chunk size</label>
+    <input id="cloudChunkSize" type="number" min="1" step="100000" value="1000000">
+    <div class="modal-actions">
+      <button id="acceptCloudSettings" class="accept">Accept</button>
+      <button id="cancelCloudSettings" class="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="terrariumModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="terrariumModalTitle">
+  <div class="modal">
+    <h2 id="terrariumModalTitle">Terrarium Settings</h2>
+    <label for="lod">Terrarium LoD</label>
+    <select id="lod"></select>
+    <label><input id="useManualBbox" type="checkbox">Manual BBOX</label>
+    <div class="bbox-grid">
+      <label><span>Min X</span><input id="bboxMinX" type="number" step="0.01"></label>
+      <label><span>Min Y</span><input id="bboxMinY" type="number" step="0.01"></label>
+      <label><span>Max X</span><input id="bboxMaxX" type="number" step="0.01"></label>
+      <label><span>Max Y</span><input id="bboxMaxY" type="number" step="0.01"></label>
+    </div>
+    <button id="resetBbox">Use Cloud BBOX</button>
+    <div class="modal-actions">
+      <button id="acceptTerrariumSettings" class="accept">Accept</button>
+      <button id="cancelTerrariumSettings" class="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="blendModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="blendModalTitle">
+  <div class="modal">
+    <h2 id="blendModalTitle">Blending Settings</h2>
+    <label for="blendStrategy">Strategy</label>
+    <select id="blendStrategy">
+      <option value="distance">Horizontal Distance</option>
+      <option value="vertical_distance">Vertical Distance</option>
+      <option value="blur">Blur</option>
+      <option value="naive">Naive</option>
+    </select>
+    <div id="blurRadiusRow" class="row"><span>Blur R</span><input id="blurRadiusM" type="range" min="0" max="500" step="5" value="160"><span id="blurRadiusMValue"></span></div>
+    <label for="tessellationStrategy">Tessellation</label>
+    <select id="tessellationStrategy">
+      <option value="none">None</option>
+      <option value="quadtree">Quadtree quads</option>
+      <option value="nvb">Newest Vertex Bisection (NVB)</option>
+      <option value="diamond48">4-8 Diamond edge splits</option>
+    </select>
+    <div class="modal-actions">
+      <button id="acceptBlendSettings" class="accept">Accept</button>
+      <button id="cancelBlendSettings" class="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="/lod_viewer.js"></script>
+</body>
+</html>
+
