@@ -111,6 +111,14 @@ On Windows, this can also be used:
 .\launch_lod_viewer.bat 8765
 ```
 
+The viewer blending strategies include:
+
+- `Horizontal Distance`: cosine falloff from the nearest Cloud DEM cell into Terrarium.
+- `Vertical Distance`: cosine falloff based on elevation mismatch to the nearest Cloud DEM cell.
+- `ISPRS IDW Buffer`: buffer-based IDW transition after Chandra et al. (2025), keeping Cloud DEM cells, adjusting Terrarium inside a default 300 m transition zone from interpolated `cloud_z - terrarium_z`, and leaving Terrarium unchanged outside the buffer. Default IDW parameters are power `0.8` and `50` neighbors.
+- `Blur`: contour-neighborhood smoothing around the Cloud DEM footprint.
+- `Naive`: direct Cloud DEM replacement where available.
+
 ## Required Traceability
 
 Each experiment must preserve:

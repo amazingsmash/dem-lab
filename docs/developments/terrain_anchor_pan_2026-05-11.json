@@ -1,0 +1,80 @@
+{
+  "development": "Terrain-Anchored Ctrl Drag",
+  "date": "2026-05-11",
+  "objective": "Add Ctrl+drag panning that raycasts the pointer against the terrain mesh and keeps the selected terrain point projected under the pointer during dragging.",
+  "assumptions": {
+    "camera_space": "Viewer camera and terrain are handled in normalized WebGL scene coordinates.",
+    "terrain_surface": "Current blended DEM surface.",
+    "refined_mesh": "When adaptive refinement is active, the refined blended mesh is used for ray intersection.",
+    "regular_mesh": "When refinement is inactive, regular blended grid triangles are used.",
+    "fallback": "If no terrain intersection is found or the projection solve fails, existing screen-space pan is used."
+  },
+  "inputs": {
+    "pointer": "Mouse client coordinates transformed to normalized device coordinates.",
+    "camera": "Current MVP matrix and its inverse.",
+    "scene_normalization": [
+      "scene.cx",
+      "scene.cy",
+      "scene.cz",
+      "scene.extent"
+    ],
+    "terrain_mesh": [
+      "currentTerrainGrid plus currentBlendValues()",
+      "current.refined_mesh layer from refinedLayerId() when active"
+    ]
+  },
+  "outputs": {
+    "ui_hint": "drag: rotate | wheel: zoom | shift+drag: pan | ctrl+drag: terrain pan",
+    "camera_updates": [
+      "panX",
+      "panY"
+    ],
+    "modified_files": [
+      "scripts/lod_viewer.html",
+      "scripts/lod_viewer.js"
+    ]
+  },
+  "parameters": {
+    "ray_triangle_epsilon": 1e-8,
+    "projection_solver_iterations": 4,
+    "projection_solver_step": "max(1e-4, dist * 1e-4)"
+  },
+  "crs": {
+    "input_crs": "Unchanged from loaded viewer experiment, normally EPSG:3857",
+    "output_crs": "Unchanged, EPSG:3857 viewer grid",
+    "crs_inference": "No new geospatial input was introduced."
+  },
+  "rasterization": {
+    "resolution": "Unchanged; uses the already-loaded viewer mesh resolution",
+    "aggregation_rule": "Unchanged; minimum z for Cloud DEM rasterization in the project pipeline",
+    "validity_mask": "Finite cells in the selected blended surface"
+  },
+  "metrics": {
+    "computed": false,
+    "reason": "Viewer interaction-only change.",
+    "formula": "Not applicable for this UI interaction change.",
+    "samples": 0
+  },
+  "runtime": {
+    "errors": [],
+    "warnings": [
+      "Direct node --check on the workspace path is blocked by sandbox path permissions; validation was run by piping file contents to node --check."
+    ],
+    "dependency_versions": {
+      "node": "18.15.0"
+    },
+    "verification": [
+      "python -m json.tool docs\\developments\\terrain_anchor_pan_2026-05-11.json",
+      "Get-Content -Raw scripts\\lod_viewer.js | node --check",
+      "Static content checks for ctrl hint, terrain raycast, projection solver, refined mesh raycast, and fallback pan"
+    ]
+  },
+  "artifacts": {
+    "generated": [
+      "docs/developments/terrain_anchor_pan_2026-05-11.md",
+      "docs/developments/terrain_anchor_pan_2026-05-11.json"
+    ],
+    "original_data_modified": false,
+    "subfolders_processed": false
+  }
+}

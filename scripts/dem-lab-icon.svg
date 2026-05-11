@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">DEM Lab icon</title>
+  <desc id="desc">Stylized elevation contours and terrain mesh inside a precise survey frame.</desc>
+  <defs>
+    <linearGradient id="terrain" x1="14" y1="54" x2="50" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4aa3ff"/>
+      <stop offset=".52" stop-color="#52d273"/>
+      <stop offset="1" stop-color="#f2c94c"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7fbff"/>
+      <stop offset="1" stop-color="#8eb8d9"/>
+    </linearGradient>
+  </defs>
+  <rect x="8.5" y="8.5" width="47" height="47" rx="10" fill="#101722" stroke="url(#frame)" stroke-width="3"/>
+  <path d="M16 44c7-9 11-14 17-14 5 0 8 4 15 14" fill="none" stroke="url(#terrain)" stroke-width="4.2" stroke-linecap="round"/>
+  <path d="M17 36c5-5 9-8 14-8 6 0 10 3 16 8" fill="none" stroke="#d9f3ff" stroke-width="2.4" stroke-linecap="round" opacity=".9"/>
+  <path d="M20 28c4-3 7-5 11-5 5 0 8 2 13 5" fill="none" stroke="#6ed6a2" stroke-width="2.2" stroke-linecap="round" opacity=".95"/>
+  <path d="M24 20c3-1.7 5-2.5 8-2.5s5 .8 8 2.5" fill="none" stroke="#f2c94c" stroke-width="2.1" stroke-linecap="round"/>
+  <path d="M19 47h26M22 39l20 8M42 39l-20 8M27 32l10 15M37 32l-10 15" fill="none" stroke="#8eb8d9" stroke-width="1.25" stroke-linecap="round" opacity=".45"/>
+  <circle cx="32" cy="32" r="2.6" fill="#f7fbff"/>
+</svg>

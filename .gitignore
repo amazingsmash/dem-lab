@@ -20,6 +20,7 @@ runs/
 logs/
 tmp/
 temp/
+referencias/
 
 # Geospatial and elevation data
 data/

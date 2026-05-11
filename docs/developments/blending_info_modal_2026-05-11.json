@@ -1,0 +1,89 @@
+{
+  "development": "Blending Information Modal",
+  "date": "2026-05-11",
+  "objective": "Add an information button to the LoD viewer blending strategy selector with short method descriptions and an original-paper link for the ISPRS IDW Buffer method.",
+  "assumptions": {
+    "ui_surface": [
+      "scripts/lod_viewer.html",
+      "scripts/lod_viewer.css",
+      "scripts/lod_viewer.js"
+    ],
+    "selected_method": "The information modal describes the currently selected blending strategy.",
+    "data_processing": "UI-only change; no DEM generation, rasterization, or metric calculation behavior changed.",
+    "working_crs": "EPSG:3857 for viewer data unless an experiment payload documents otherwise."
+  },
+  "inputs": {
+    "blend_strategy_ids": [
+      "distance",
+      "isprs_idw",
+      "vertical_distance",
+      "blur",
+      "naive"
+    ],
+    "isprs_paper_url": "https://isprs-annals.copernicus.org/articles/X-5-W2-2025/77/2025/isprs-annals-X-5-W2-2025-77-2025.pdf"
+  },
+  "outputs": {
+    "ui_controls": [
+      "Information button next to the blending strategy label",
+      "Small modal with method title, description, relevant parameters, and optional reference link",
+      "Expanded ISPRS IDW explanation with inverse-distance weighting equations rendered through KaTeX"
+    ],
+    "modified_files": [
+      "scripts/lod_viewer.html",
+      "scripts/lod_viewer.css",
+      "scripts/lod_viewer.js"
+    ],
+    "documentation": [
+      "docs/developments/blending_info_modal_2026-05-11.md",
+      "docs/developments/blending_info_modal_2026-05-11.json"
+    ]
+  },
+  "parameters": {
+    "changed_blending_parameters": false,
+    "math_rendering_dependency": "KaTeX 0.16.45 from jsDelivr CDN",
+    "isprs_controls_described": [
+      "transition radius",
+      "IDW power",
+      "maximum neighbors"
+    ],
+    "isprs_equations_described": [
+      "dH_i = cloud_z_i - terrarium_z_i at inner edge controls",
+      "dH_i = 0 at outer buffer controls",
+      "dH = sum(w_i * dH_i) / sum(w_i)",
+      "w_i = 1 / (d_i^p + eps)",
+      "z = terrarium_z + dH"
+    ]
+  },
+  "crs": {
+    "input_crs": "Unchanged from viewer data, normally EPSG:3857",
+    "output_crs": "Unchanged, EPSG:3857 viewer grid",
+    "crs_inference": "No new data inputs were introduced."
+  },
+  "rasterization": {
+    "resolution": "Unchanged; selected Terrarium LoD for blended viewer layers",
+    "aggregation_rule": "Unchanged; minimum z for Cloud DEM rasterization in the project pipeline",
+    "validity_mask": "Unchanged; finite Cloud DEM cells"
+  },
+  "metrics": {
+    "computed": false,
+    "reason": "UI-only development; no DEM metric calculation was rerun.",
+    "formula": "Not applicable for this UI change.",
+    "samples": 0
+  },
+  "runtime": {
+    "errors": [],
+    "warnings": [],
+    "dependency_versions": {
+      "katex": "0.16.45",
+      "node": "Local node syntax check was blocked by sandbox filesystem permissions in C:\\Users\\Jose."
+    }
+  },
+  "artifacts": {
+    "generated": [
+      "docs/developments/blending_info_modal_2026-05-11.md",
+      "docs/developments/blending_info_modal_2026-05-11.json"
+    ],
+    "original_data_modified": false,
+    "subfolders_processed": false
+  }
+}

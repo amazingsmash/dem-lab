@@ -27,12 +27,16 @@ import rasterio.windows
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 TERRARIUM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 NODATA = -9999.0
+ISPRS_IDW_TRANSITION_RADIUS_M = 300.0
+ISPRS_IDW_POWER = 0.8
+ISPRS_IDW_NEIGHBORS = 50
 
 
 STATIC_DIR = Path(__file__).resolve().parent
 HTML_PATH = STATIC_DIR / "lod_viewer.html"
 CSS_PATH = STATIC_DIR / "lod_viewer.css"
 JS_PATH = STATIC_DIR / "lod_viewer.js"
+ICON_PATH = STATIC_DIR / "dem-lab-icon.svg"
 
 
 class TerrainContext:
@@ -735,6 +739,80 @@ class TerrainContext:
                 )
         return blended
 
+    def isprs_idw_blend(
+        self,
+        cloud: np.ndarray,
+        terrarium: np.ndarray,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        transition_radius_m: float,
+        power: float,
+        neighbors: int,
+    ) -> np.ndarray:
+        valid = np.isfinite(cloud)
+        if not valid.any() or transition_radius_m <= 0.0:
+            return np.where(valid, cloud, terrarium)
+        contour = self.cloud_contour_mask(cloud)
+        if not contour.any():
+            return np.where(valid, cloud, terrarium)
+
+        edge_points: list[tuple[float, float, float]] = []
+        for row, col in np.argwhere(contour):
+            edge_points.append((float(xs[col]), float(ys[row]), float(cloud[row, col] - terrarium[row, col])))
+
+        dist, _nearest_z = self.cloud_distance_field(cloud, xs, ys, transition_radius_m)
+        outer_zero_points: list[tuple[float, float, float]] = []
+        grid_step = max(
+            float(abs(np.median(np.diff(xs)))) if len(xs) > 1 else transition_radius_m,
+            float(abs(np.median(np.diff(ys)))) if len(ys) > 1 else transition_radius_m,
+        )
+        edge_band = max(grid_step * 1.5, transition_radius_m * 0.08)
+        outer = (~valid) & np.isfinite(dist) & (np.abs(dist - transition_radius_m) <= edge_band)
+        for row, col in np.argwhere(outer):
+            outer_zero_points.append((float(xs[col]), float(ys[row]), 0.0))
+        if not outer_zero_points:
+            reachable_rows_cols = np.argwhere((~valid) & np.isfinite(dist))
+            for row, col in reachable_rows_cols:
+                if dist[row, col] >= transition_radius_m * 0.8:
+                    outer_zero_points.append((float(xs[col]), float(ys[row]), 0.0))
+
+        known_points = edge_points + outer_zero_points
+        if not known_points:
+            return np.where(valid, cloud, terrarium)
+
+        blended = terrarium.copy()
+        blended[valid] = cloud[valid]
+        max_neighbors = max(1, int(neighbors))
+        idw_power = max(0.01, float(power))
+        for row, col in np.argwhere((~valid) & np.isfinite(dist)):
+            x = float(xs[col])
+            y = float(ys[row])
+            candidates: list[tuple[float, float]] = []
+            for px, py, diff in known_points:
+                distance = math.hypot(x - px, y - py)
+                if distance > transition_radius_m * 1.25:
+                    continue
+                if distance <= 1e-9:
+                    candidates = [(0.0, diff)]
+                    break
+                candidates.append((distance, diff))
+            if not candidates:
+                continue
+            candidates.sort(key=lambda item: item[0])
+            selected = candidates[:max_neighbors]
+            if selected[0][0] == 0.0:
+                adjustment = selected[0][1]
+            else:
+                weight_sum = 0.0
+                weighted_diff = 0.0
+                for distance, diff in selected:
+                    weight = 1.0 / (distance**idw_power)
+                    weight_sum += weight
+                    weighted_diff += weight * diff
+                adjustment = weighted_diff / weight_sum if weight_sum > 0.0 else 0.0
+            blended[row, col] = terrarium[row, col] + adjustment
+        return blended
+
     def bilinear_sample(self, values: np.ndarray, xs: np.ndarray, ys: np.ndarray, x: float, y: float) -> float:
         ny, nx = values.shape
         if nx == 1 or ny == 1:
@@ -1425,6 +1503,9 @@ class TerrainContext:
         refine_blends: bool = False,
         tessellation_strategy: str = "quadtree",
         blur_radius_m: float | None = None,
+        idw_transition_radius_m: float = ISPRS_IDW_TRANSITION_RADIUS_M,
+        idw_power: float = ISPRS_IDW_POWER,
+        idw_neighbors: int = ISPRS_IDW_NEIGHBORS,
         terrarium_bounds: tuple[float, float, float, float] | None = None,
     ) -> dict[str, Any]:
         start = time.perf_counter()
@@ -1439,6 +1520,15 @@ class TerrainContext:
         blend = self.distance_blend(cloud, terrarium, xs, ys, radius)
         vertical_blend = self.vertical_distance_blend(cloud, terrarium, xs, ys, radius)
         blur = self.blur_blend(terrarium, xs, ys, blur_radius)
+        isprs_idw = self.isprs_idw_blend(
+            cloud,
+            terrarium,
+            xs,
+            ys,
+            max(0.0, float(idw_transition_radius_m)),
+            max(0.01, float(idw_power)),
+            max(1, int(idw_neighbors)),
+        )
         payload = {
             "lod": z,
             "resolution_m": float(grid["resolution"]),
@@ -1452,13 +1542,21 @@ class TerrainContext:
             "distance_blend": np.round(blend.reshape(-1), 3).tolist(),
             "vertical_distance_blend": np.round(vertical_blend.reshape(-1), 3).tolist(),
             "blur_blend": np.round(blur.reshape(-1), 3).tolist(),
+            "isprs_idw_blend": np.round(isprs_idw.reshape(-1), 3).tolist(),
             "cloud_layer": self.fixed_cloud_layer(),
             "cloud_valid_count": int(np.isfinite(cloud).sum()),
             "blend_radius_m": radius,
             "blur_radius_m": blur_radius,
+            "isprs_idw_parameters": {
+                "transition_radius_m": max(0.0, float(idw_transition_radius_m)),
+                "power": max(0.01, float(idw_power)),
+                "neighbors": max(1, int(idw_neighbors)),
+                "source_paper": "Chandra et al. 2025, Integrated Multi-Resolution DEM Generation: Merging Airborne LiDAR and CartoDEM for Seamless Terrain Modeling",
+            },
             "blend_formula": "Horizontal Distance: If Cloud DEM is defined, z=cloud_z. Otherwise t=clamp(d_horizontal/R,0,1), w=0.5*(1+cos(pi*t)), z=w*z_nearest_cloud+(1-w)*z_terrarium.",
             "vertical_blend_formula": "Vertical Distance: If Cloud DEM is defined, z=cloud_z. Otherwise use the horizontally nearest valid Cloud DEM value, t=clamp(abs(z_nearest_cloud-z_terrarium)/R,0,1), w=0.5*(1+cos(pi*t)), z=w*z_nearest_cloud+(1-w)*z_terrarium.",
             "blur_formula": "If Cloud DEM is defined, z=cloud_z. Otherwise collect valid Cloud DEM contour points within R meters. For each contour point, W=0.5*(1+cos(pi*d_m/R)). Then w_avg=mean(W), z_contour_avg=sum(W*z_contour)/sum(W), and z=w_avg*z_contour_avg+(1-w_avg)*z_terrarium.",
+            "isprs_idw_formula": "ISPRS IDW Buffer: keep Cloud DEM where valid; in the outer transition zone, interpolate H_diff=cloud_z-terrarium_z from inner Cloud DEM edge points and zero-valued outer buffer points using IDW, then set z=terrarium_z+H_diff. Outside the transition zone, keep Terrarium.",
             "tiles": grid["tiles"],
             "bbox": {
                 "terrarium_dem": self.bbox_dict(grid["bounds"]),
@@ -1507,6 +1605,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/lod_viewer.js":
             self.file_response(JS_PATH, "application/javascript; charset=utf-8")
+            return
+        if parsed.path == "/dem-lab-icon.svg":
+            self.file_response(ICON_PATH, "image/svg+xml; charset=utf-8")
             return
         if parsed.path == "/api/info":
             lods = self.context.lod_info()
@@ -1564,6 +1665,18 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self.send_error(400, "blur_radius_m must be a number")
                 return
+            try:
+                idw_transition_radius_m = float(
+                    query.get("idw_transition_radius_m", [str(ISPRS_IDW_TRANSITION_RADIUS_M)])[0]
+                )
+                idw_power = float(query.get("idw_power", [str(ISPRS_IDW_POWER)])[0])
+                idw_neighbors = int(query.get("idw_neighbors", [str(ISPRS_IDW_NEIGHBORS)])[0])
+            except ValueError:
+                self.send_error(400, "IDW transition radius, power, and neighbors must be numeric")
+                return
+            if idw_transition_radius_m < 0.0 or idw_power <= 0.0 or idw_neighbors <= 0:
+                self.send_error(400, "IDW transition radius must be non-negative; power and neighbors must be positive")
+                return
             terrarium_bounds = None
             bbox_keys = ("bbox_minx", "bbox_miny", "bbox_maxx", "bbox_maxy")
             if any(key in query for key in bbox_keys):
@@ -1599,6 +1712,9 @@ class Handler(BaseHTTPRequestHandler):
                     refine_blends=refine_blends,
                     tessellation_strategy=tessellation,
                     blur_radius_m=blur_radius_m,
+                    idw_transition_radius_m=idw_transition_radius_m,
+                    idw_power=idw_power,
+                    idw_neighbors=idw_neighbors,
                     terrarium_bounds=terrarium_bounds,
                 )
             )

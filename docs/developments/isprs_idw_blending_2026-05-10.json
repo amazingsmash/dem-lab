@@ -1,0 +1,67 @@
+{
+  "development": "ISPRS IDW Buffer Blending Mode",
+  "date": "2026-05-10",
+  "objective": "Add a selectable DEM blending mode based on Chandra et al. (2025) for buffer-based IDW transition between Cloud DEM and Terrarium.",
+  "assumptions": {
+    "high_resolution_dem": "Cloud DEM",
+    "support_dem": "Terrarium",
+    "working_crs": "EPSG:3857",
+    "distance_units": "CRS meters",
+    "vertical_correction": "No explicit datum correction; local edge differences are interpolated."
+  },
+  "inputs": {
+    "cloud_dem": "Finite Cloud DEM cells sampled on selected viewer grid",
+    "support_dem": "Terrarium grid for selected LoD and BBOX",
+    "validity_mask": "Finite Cloud DEM cells"
+  },
+  "outputs": {
+    "api_layer": "isprs_idw_blend",
+    "api_metadata": "isprs_idw_parameters",
+    "ui_option": "ISPRS IDW Buffer",
+    "ignored_reference_folder": "referencias/"
+  },
+  "parameters": {
+    "transition_radius_m_default": 300.0,
+    "idw_power_default": 0.8,
+    "idw_neighbors_default": 50
+  },
+  "method": [
+    "Detect Cloud DEM contour cells.",
+    "Assign inner controls H_diff = cloud_z - terrarium_z.",
+    "Assign zero-valued outer controls around the transition radius.",
+    "IDW-interpolate H_diff in invalid Cloud DEM cells within the transition radius.",
+    "Set blended z = terrarium_z + interpolated H_diff in the transition zone.",
+    "Keep Cloud DEM inside its valid footprint and Terrarium outside the transition zone."
+  ],
+  "crs": {
+    "input_crs": "Inherited from viewer experiment, normally EPSG:3857",
+    "output_crs": "EPSG:3857"
+  },
+  "rasterization": {
+    "viewer_resolution": "Selected Terrarium LoD",
+    "cloud_dem_aggregation": "Minimum z per cell from project pipeline",
+    "validity_mask": "Finite Cloud DEM cells"
+  },
+  "metrics": {
+    "computed": false,
+    "reason": "No local DEM experiment was executed for this code change."
+  },
+  "runtime": {
+    "errors": [
+      "PowerShell Invoke-WebRequest could not connect to the remote PDF URL because sandbox network access is blocked."
+    ],
+    "warnings": [
+      "PDF was readable through the web tool but could not be saved to the workspace by local shell."
+    ]
+  },
+  "artifacts": {
+    "modified_files": [
+      ".gitignore",
+      "README.md",
+      "scripts/lod_terrarium_viewer.py",
+      "scripts/lod_viewer.html",
+      "scripts/lod_viewer.js"
+    ],
+    "reference_folder": "referencias/"
+  }
+}

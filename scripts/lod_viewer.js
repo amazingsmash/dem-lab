@@ -14,6 +14,9 @@ let appliedBlendSettings = {
   strategy: "distance",
   tessellation: "none",
   blurRadiusM: 160,
+  idwTransitionRadiusM: 300,
+  idwPower: 0.8,
+  idwNeighbors: 50,
 };
 let appliedTerrariumSettings = {
   lod: INITIAL_LOD,
@@ -31,6 +34,55 @@ let profilePoints = [];
 let profileChart = null;
 let profileLineBuffer = null;
 let profileSurfaceCache = null;
+const BLEND_METHOD_INFO = {
+  distance: {
+    title: "Horizontal Distance",
+    description: "Keeps Cloud DEM elevations where they exist. Outside the Cloud DEM footprint, it blends from the nearest Cloud DEM elevation back to Terrarium using a cosine weight based on horizontal distance.",
+    parameters: "Uses the general blend radius from the viewer API."
+  },
+  isprs_idw: {
+    title: "ISPRS IDW Buffer",
+    description: "Keeps the Cloud DEM inside its valid footprint, leaves Terrarium unchanged outside the transition buffer, and adjusts Terrarium inside the buffer with IDW: an inverse-distance weighted interpolation. Inner edge controls store the local Cloud-to-Terrarium height difference. Outer controls force the adjustment back to zero. Each transition cell receives the weighted average of nearby control differences, then that adjustment is added to Terrarium.",
+    equations: [
+      String.raw`\Delta h_i = z_{\mathrm{cloud},i} - z_{\mathrm{terrarium},i}`,
+      String.raw`\Delta h = \frac{\sum_i w_i\,\Delta h_i}{\sum_i w_i}`,
+      String.raw`w_i = \frac{1}{d_i^p + \varepsilon}`,
+      String.raw`z_{\mathrm{blend}} = z_{\mathrm{terrarium}} + \Delta h`
+    ],
+    parameters: "Current controls: transition radius R limits the buffer width, IDW power p controls how quickly nearby controls dominate, and maximum neighbors N limits how many controls enter the weighted average.",
+    reference: {
+      label: "Integrated Multi-Resolution DEM Generation",
+      url: "https://isprs-annals.copernicus.org/articles/X-5-W2-2025/77/2025/isprs-annals-X-5-W2-2025-77-2025.pdf"
+    }
+  },
+  vertical_distance: {
+    title: "Vertical Distance",
+    description: "Keeps Cloud DEM elevations where available. In surrounding Terrarium cells, it blends toward the nearest Cloud DEM elevation according to the vertical elevation mismatch instead of planimetric distance.",
+    parameters: "Uses the general blend radius as the vertical transition scale."
+  },
+  blur: {
+    title: "Blur",
+    description: "Smooths the transition around the Cloud DEM footprint by sampling contour-neighborhood elevations and mixing them with Terrarium near the edge.",
+    parameters: "Current control: blur radius in CRS meters."
+  },
+  naive: {
+    title: "Naive",
+    description: "Directly replaces Terrarium with Cloud DEM wherever Cloud DEM cells are valid. Terrarium remains unchanged everywhere else.",
+    parameters: "No additional blending parameters."
+  }
+};
+
+function updateProfileStatus(state = null) {
+  const button = document.getElementById("profileTool");
+  const status = document.getElementById("profileStatus");
+  button.setAttribute("aria-pressed", profileMode ? "true" : "false");
+  if (state) {
+    status.textContent = state;
+    return;
+  }
+  if (!profileMode) status.textContent = "Profile: inactive";
+  else status.textContent = `Profile: ${Math.min(profilePoints.length, 2)} of 2 points`;
+}
 
 function shader(type, source) {
   const s = gl.createShader(type);
@@ -303,6 +355,7 @@ function blendStrategyLabel() {
   const strategy = blendStrategy();
   if (strategy === "naive") return "Naive";
   if (strategy === "blur") return "Blur";
+  if (strategy === "isprs_idw") return "ISPRS IDW Buffer";
   if (strategy === "vertical_distance") return "Vertical Distance";
   return "Horizontal Distance";
 }
@@ -312,6 +365,7 @@ function currentBlendValues() {
   const strategy = blendStrategy();
   if (strategy === "naive") return current.cloud_replacement;
   if (strategy === "blur") return current.blur_blend;
+  if (strategy === "isprs_idw") return current.isprs_idw_blend;
   if (strategy === "vertical_distance") return current.vertical_distance_blend;
   return current.distance_blend;
 }
@@ -341,7 +395,7 @@ function rebuildMeshes() {
   const strategy = blendStrategy();
   const refinedLayer = strategy === "naive" ? "cloud_replacement" : (strategy === "blur" ? "blur_blend" : (strategy === "vertical_distance" ? "vertical_distance_blend" : "distance_blend"));
   let blendedMesh = makeMesh(currentTerrainGrid, currentBlendValues());
-  if (refined) {
+  if (refined && strategy !== "isprs_idw") {
     const layer = current.refined_mesh.layers[refinedLayer];
     blendedMesh = current.refined_mesh.geometry === "triangles" ? makeTriangleMesh(layer.triangles) : makeQuadMesh(layer.quads);
   }
@@ -464,17 +518,28 @@ function bboxQueryString(bbox) {
 }
 
 function readBlendSettingsFromForm() {
-  return {
+  const settings = {
     strategy: document.getElementById("blendStrategy").value,
     tessellation: document.getElementById("tessellationStrategy").value,
     blurRadiusM: Number(document.getElementById("blurRadiusM").value),
+    idwTransitionRadiusM: Number(document.getElementById("idwTransitionRadiusM").value),
+    idwPower: Number(document.getElementById("idwPower").value),
+    idwNeighbors: Number(document.getElementById("idwNeighbors").value),
   };
+  if (!Number.isFinite(settings.blurRadiusM) || settings.blurRadiusM < 0) throw new Error("Blur radius must be non-negative");
+  if (!Number.isFinite(settings.idwTransitionRadiusM) || settings.idwTransitionRadiusM < 0) throw new Error("IDW transition radius must be non-negative");
+  if (!Number.isFinite(settings.idwPower) || settings.idwPower <= 0) throw new Error("IDW power must be greater than zero");
+  if (!Number.isInteger(settings.idwNeighbors) || settings.idwNeighbors <= 0) throw new Error("IDW neighbors must be a positive integer");
+  return settings;
 }
 
 function writeBlendSettingsToForm(settings) {
   document.getElementById("blendStrategy").value = settings.strategy;
   document.getElementById("tessellationStrategy").value = settings.tessellation;
   document.getElementById("blurRadiusM").value = String(settings.blurRadiusM);
+  document.getElementById("idwTransitionRadiusM").value = String(settings.idwTransitionRadiusM ?? 300);
+  document.getElementById("idwPower").value = String(settings.idwPower ?? 0.8);
+  document.getElementById("idwNeighbors").value = String(settings.idwNeighbors ?? 50);
   updateSliderLabels();
   updateBlendModalVisibility();
 }
@@ -488,8 +553,49 @@ function closeBlendModal() {
   document.getElementById("blendModal").classList.remove("active");
 }
 
+function openBlendInfoModal() {
+  const strategy = document.getElementById("blendStrategy").value;
+  const info = BLEND_METHOD_INFO[strategy] || BLEND_METHOD_INFO.distance;
+  document.getElementById("blendInfoTitle").textContent = info.title;
+  document.getElementById("blendInfoDescription").textContent = info.description;
+  const equationsEl = document.getElementById("blendInfoEquations");
+  equationsEl.innerHTML = "";
+  equationsEl.style.display = info.equations && info.equations.length ? "grid" : "none";
+  for (const equation of info.equations || []) {
+    const item = document.createElement("div");
+    item.className = "info-equation";
+    if (window.katex) {
+      katex.render(equation, item, {displayMode: true, throwOnError: false});
+    } else {
+      item.textContent = equation;
+    }
+    equationsEl.appendChild(item);
+  }
+  document.getElementById("blendInfoParameters").textContent = info.parameters || "";
+  const referenceEl = document.getElementById("blendInfoReference");
+  referenceEl.innerHTML = "";
+  if (info.reference) {
+    const link = document.createElement("a");
+    link.href = info.reference.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = info.reference.label;
+    referenceEl.append("Paper: ", link);
+  }
+  document.getElementById("blendInfoModal").classList.add("active");
+}
+
+function closeBlendInfoModal() {
+  document.getElementById("blendInfoModal").classList.remove("active");
+}
+
 function updateBlendModalVisibility() {
-  document.getElementById("blurRadiusRow").style.display = document.getElementById("blendStrategy").value === "blur" ? "grid" : "none";
+  const strategy = document.getElementById("blendStrategy").value;
+  document.getElementById("blurRadiusRow").style.display = strategy === "blur" ? "grid" : "none";
+  const showIdw = strategy === "isprs_idw";
+  for (const id of ["idwTransitionRow", "idwPowerRow", "idwNeighborsRow"]) {
+    document.getElementById(id).style.display = showIdw ? "grid" : "none";
+  }
 }
 
 async function loadInfo() {
@@ -519,6 +625,9 @@ async function loadInfo() {
   blurRadius.value = String(Math.round(defaultBlurRadius));
   blurRadius.max = String(Math.max(500, Math.ceil(defaultBlurRadius * 3 / 50) * 50));
   appliedBlendSettings.blurRadiusM = Number(blurRadius.value);
+  appliedBlendSettings.idwTransitionRadiusM = 300;
+  appliedBlendSettings.idwPower = 0.8;
+  appliedBlendSettings.idwNeighbors = 50;
   writeBlendSettingsToForm(appliedBlendSettings);
   setBboxInputs(info.cloud_bbox);
   updateSliderLabels();
@@ -550,12 +659,20 @@ function updateMetaText() {
   }
   const pointCount = current.point_sample ? current.point_sample.length : 0;
   const cacheText = current.cloud_source && current.cloud_source.cache_hit ? " | cache hit" : "";
-  metaEl.textContent = `Terrarium z${current.lod} | ${current.resolution_m.toFixed(2)} m/px | ${current.nx}x${current.ny}\nCloud DEM ${current.cloud_loaded ? "loaded" : "not loaded"}${cacheText} | fixed view ${cloudGrid.resolution_m.toFixed(2)} m/px | ${cloudGrid.nx}x${cloudGrid.ny}\nPoint Cloud sample: ${pointCount} points\nBlended DEM strategy: ${blendStrategyLabel()}\n${current.tiles.length} tiles | blend cloud cells: ${current.cloud_valid_count}\nBlend radius: ${current.blend_radius_m.toFixed(2)} m | blur radius: ${current.blur_radius_m.toFixed(2)} m${refinementText}\nTerrarium DEM BBOX: ${formatBbox(current.bbox.terrarium_dem)}\nPoint Cloud BBOX: ${formatBbox(current.bbox.point_cloud)}`;
+  const idw = current.isprs_idw_parameters || {};
+  const idwText = blendStrategy() === "isprs_idw" ? `\nISPRS IDW: R ${Number(idw.transition_radius_m).toFixed(2)} m | p ${Number(idw.power).toFixed(2)} | N ${idw.neighbors}` : "";
+  metaEl.textContent = `Terrarium z${current.lod} | ${current.resolution_m.toFixed(2)} m/px | ${current.nx}x${current.ny}\nCloud DEM ${current.cloud_loaded ? "loaded" : "not loaded"}${cacheText} | fixed view ${cloudGrid.resolution_m.toFixed(2)} m/px | ${cloudGrid.nx}x${cloudGrid.ny}\nPoint Cloud sample: ${pointCount} points\nBlended DEM strategy: ${blendStrategyLabel()}\n${current.tiles.length} tiles | blend cloud cells: ${current.cloud_valid_count}\nBlend radius: ${current.blend_radius_m.toFixed(2)} m | blur radius: ${current.blur_radius_m.toFixed(2)} m${idwText}${refinementText}\nTerrarium DEM BBOX: ${formatBbox(current.bbox.terrarium_dem)}\nPoint Cloud BBOX: ${formatBbox(current.bbox.point_cloud)}`;
 }
 
 async function loadMesh(forcedLod = null, frameTarget = null) {
   const lod = document.getElementById("lod");
-  const requestedBlendSettings = readBlendSettingsFromForm();
+  let requestedBlendSettings;
+  try {
+    requestedBlendSettings = readBlendSettingsFromForm();
+  } catch (e) {
+    metaEl.textContent = `Failed: ${e.message}`;
+    return;
+  }
   let requestedTerrariumSettings;
   try {
     requestedTerrariumSettings = readTerrariumSettingsFromForm();
@@ -566,7 +683,7 @@ async function loadMesh(forcedLod = null, frameTarget = null) {
   const useManualBbox = document.getElementById("useManualBbox");
   const bboxInputs = ["bboxMinX", "bboxMinY", "bboxMaxX", "bboxMaxY"].map(id => document.getElementById(id));
   const bboxButtons = ["resetBbox", "openBlendSettings", "openTerrariumSettings", "openCloudSettings"].map(id => document.getElementById(id));
-  const blendControls = ["blendStrategy", "tessellationStrategy", "blurRadiusM", "acceptBlendSettings", "cancelBlendSettings"].map(id => document.getElementById(id));
+  const blendControls = ["blendStrategy", "tessellationStrategy", "blurRadiusM", "idwTransitionRadiusM", "idwPower", "idwNeighbors", "acceptBlendSettings", "cancelBlendSettings"].map(id => document.getElementById(id));
   const terrariumControls = ["lod", "useManualBbox", "acceptTerrariumSettings", "cancelTerrariumSettings"].map(id => document.getElementById(id));
   const cloudControls = ["cloudLasDir", "cloudSourceCrs", "cloudPixelSize", "cloudChunkSize", "acceptCloudSettings", "cancelCloudSettings"].map(id => document.getElementById(id));
   if (Number.isInteger(forcedLod)) {
@@ -574,9 +691,10 @@ async function loadMesh(forcedLod = null, frameTarget = null) {
     lod.value = String(forcedLod);
   }
   const z = String(requestedTerrariumSettings.lod);
-  const refineQuery = requestedBlendSettings.tessellation !== "none" ? "&refine=1" : "";
+  const refineQuery = requestedBlendSettings.tessellation !== "none" && requestedBlendSettings.strategy !== "isprs_idw" ? "&refine=1" : "";
   const tessellationQuery = `&tessellation=${encodeURIComponent(requestedBlendSettings.tessellation)}`;
   const blurRadiusQuery = `&blur_radius_m=${encodeURIComponent(requestedBlendSettings.blurRadiusM)}`;
+  const idwQuery = `&idw_transition_radius_m=${encodeURIComponent(requestedBlendSettings.idwTransitionRadiusM)}&idw_power=${encodeURIComponent(requestedBlendSettings.idwPower)}&idw_neighbors=${encodeURIComponent(requestedBlendSettings.idwNeighbors)}`;
   let bboxQuery = "";
   try {
     bboxQuery = bboxQueryString(readManualBbox(requestedTerrariumSettings));
@@ -590,7 +708,7 @@ async function loadMesh(forcedLod = null, frameTarget = null) {
   setBusy(true, `Waiting for backend: downloading / recalculating z${z}...`);
   metaEl.textContent = `Downloading / recalculating z${z}...`;
   try {
-    const data = await fetch(`/api/mesh?z=${encodeURIComponent(z)}${refineQuery}${tessellationQuery}${blurRadiusQuery}${bboxQuery}`).then(r => {
+    const data = await fetch(`/api/mesh?z=${encodeURIComponent(z)}${refineQuery}${tessellationQuery}${blurRadiusQuery}${idwQuery}${bboxQuery}`).then(r => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     });
@@ -652,15 +770,36 @@ async function loadCloudDem() {
 }
 
 let yaw = -0.7, pitch = 0.8, dist = 2.1, panX = 0, panY = 0;
-let dragging = false, lastX = 0, lastY = 0, panning = false, dragMoved = false;
-canvas.addEventListener("mousedown", e => { dragging = true; dragMoved = false; panning = e.shiftKey; lastX = e.clientX; lastY = e.clientY; });
-window.addEventListener("mouseup", () => dragging = false);
+let dragging = false, lastX = 0, lastY = 0, panning = false, terrainPanning = false, terrainPanAnchor = null, dragMoved = false;
+canvas.addEventListener("mousedown", e => {
+  dragging = true;
+  dragMoved = false;
+  panning = e.shiftKey;
+  terrainPanning = e.ctrlKey;
+  terrainPanAnchor = terrainPanning ? terrainIntersectionFromEvent(e) : null;
+  if (terrainPanning && terrainPanAnchor) e.preventDefault();
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+window.addEventListener("mouseup", () => {
+  dragging = false;
+  terrainPanning = false;
+  terrainPanAnchor = null;
+});
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
   const dx = e.clientX - lastX, dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
   if (Math.hypot(dx, dy) > 2) dragMoved = true;
-  if (panning) { panX += dx / canvas.clientWidth * dist; panY -= dy / canvas.clientHeight * dist; }
+  if (terrainPanning && terrainPanAnchor) {
+    e.preventDefault();
+    if (!panTerrainAnchorToEvent(terrainPanAnchor, e)) {
+      panX += dx / canvas.clientWidth * dist;
+      panY -= dy / canvas.clientHeight * dist;
+    }
+  }
+  else if (terrainPanning) { panX += dx / canvas.clientWidth * dist; panY -= dy / canvas.clientHeight * dist; }
+  else if (panning) { panX += dx / canvas.clientWidth * dist; panY -= dy / canvas.clientHeight * dist; }
   else { yaw += dx * 0.008; pitch = Math.max(-1.45, Math.min(1.45, pitch + dy * 0.008)); }
 });
 canvas.addEventListener("wheel", e => { e.preventDefault(); dist *= Math.exp(e.deltaY * 0.001); dist = Math.max(0.4, Math.min(12, dist)); }, {passive:false});
@@ -724,22 +863,147 @@ function currentMvp() {
   return matMul(perspective(Math.PI/4, aspect, 0.01, 100), lookAt(eye, center, [0,1,0]));
 }
 
-function screenToMapPoint(e) {
+function eventToNdc(e) {
   resize();
   const rect = canvas.getBoundingClientRect();
-  const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  const y = 1 - ((e.clientY - rect.top) / rect.height) * 2;
+  return {
+    x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    y: 1 - ((e.clientY - rect.top) / rect.height) * 2
+  };
+}
+
+function screenRayFromEvent(e) {
+  const ndc = eventToNdc(e);
   const inv = matInv(currentMvp());
   if (!inv) return null;
-  const near = transform4(inv, [x, y, -1, 1]);
-  const far = transform4(inv, [x, y, 1, 1]);
+  const near = transform4(inv, [ndc.x, ndc.y, -1, 1]);
+  const far = transform4(inv, [ndc.x, ndc.y, 1, 1]);
   for (const p of [near, far]) { p[0] /= p[3]; p[1] /= p[3]; p[2] /= p[3]; }
+  return {near, far, ndc};
+}
+
+function screenToMapPoint(e) {
+  const ray = screenRayFromEvent(e);
+  if (!ray) return null;
+  const {near, far} = ray;
   const dy = far[1] - near[1];
   if (Math.abs(dy) < 1e-8) return null;
   const t = -near[1] / dy;
   const nx = near[0] + (far[0] - near[0]) * t;
   const nz = near[2] + (far[2] - near[2]) * t;
   return {x: nx * scene.extent + scene.cx, y: nz * scene.extent + scene.cy};
+}
+
+function normalizedTerrainPoint(x, y, z) {
+  return [(x - scene.cx) / scene.extent, (z - scene.cz) * 3.0 / scene.extent, (y - scene.cy) / scene.extent];
+}
+
+function rayTriangleIntersection(origin, direction, a, b, c) {
+  const edge1 = sub(b, a);
+  const edge2 = sub(c, a);
+  const h = cross(direction, edge2);
+  const det = edge1[0]*h[0] + edge1[1]*h[1] + edge1[2]*h[2];
+  if (Math.abs(det) < 1e-8) return null;
+  const invDet = 1 / det;
+  const s = sub(origin, a);
+  const u = invDet * (s[0]*h[0] + s[1]*h[1] + s[2]*h[2]);
+  if (u < -1e-6 || u > 1 + 1e-6) return null;
+  const q = cross(s, edge1);
+  const v = invDet * (direction[0]*q[0] + direction[1]*q[1] + direction[2]*q[2]);
+  if (v < -1e-6 || u + v > 1 + 1e-6) return null;
+  const t = invDet * (edge2[0]*q[0] + edge2[1]*q[1] + edge2[2]*q[2]);
+  if (t <= 1e-6) return null;
+  return {
+    t,
+    point: [
+      origin[0] + direction[0] * t,
+      origin[1] + direction[1] * t,
+      origin[2] + direction[2] * t
+    ]
+  };
+}
+
+function terrainTrianglesForRaycast() {
+  if (!current || !currentTerrainGrid) return [];
+  const refined = current.refined_mesh && current.refined_mesh.applied;
+  if (refined) {
+    const layer = current.refined_mesh.layers[refinedLayerId()];
+    return trianglesFromRefinedLayer(layer, current.refined_mesh.geometry);
+  }
+  const grid = currentTerrainGrid;
+  const values = currentBlendValues();
+  const triangles = [];
+  for (let y = 0; y < grid.ny - 1; y++) {
+    for (let x = 0; x < grid.nx - 1; x++) {
+      const i = y * grid.nx + x;
+      const a = [grid.xs[x], grid.ys[y], values[i]];
+      const b = [grid.xs[x + 1], grid.ys[y], values[i + 1]];
+      const c = [grid.xs[x], grid.ys[y + 1], values[i + grid.nx]];
+      const d = [grid.xs[x + 1], grid.ys[y + 1], values[i + grid.nx + 1]];
+      if ([a, c, b].every(p => finite(p[2]))) triangles.push([a[0], a[1], a[2], c[0], c[1], c[2], b[0], b[1], b[2]]);
+      if ([b, c, d].every(p => finite(p[2]))) triangles.push([b[0], b[1], b[2], c[0], c[1], c[2], d[0], d[1], d[2]]);
+    }
+  }
+  return triangles;
+}
+
+function terrainIntersectionFromEvent(e) {
+  const ray = screenRayFromEvent(e);
+  if (!ray) return null;
+  const origin = [ray.near[0], ray.near[1], ray.near[2]];
+  const direction = norm([ray.far[0] - ray.near[0], ray.far[1] - ray.near[1], ray.far[2] - ray.near[2]]);
+  let best = null;
+  for (const t of terrainTrianglesForRaycast()) {
+    const a = normalizedTerrainPoint(t[0], t[1], t[2]);
+    const b = normalizedTerrainPoint(t[3], t[4], t[5]);
+    const c = normalizedTerrainPoint(t[6], t[7], t[8]);
+    const hit = rayTriangleIntersection(origin, direction, a, b, c);
+    if (hit && (!best || hit.t < best.t)) best = hit;
+  }
+  return best ? best.point : null;
+}
+
+function projectPointToNdc(point) {
+  const clip = transform4(currentMvp(), [point[0], point[1], point[2], 1]);
+  if (!clip || Math.abs(clip[3]) < 1e-8) return null;
+  return {x: clip[0] / clip[3], y: clip[1] / clip[3]};
+}
+
+function panTerrainAnchorToEvent(anchor, e) {
+  const target = eventToNdc(e);
+  for (let i = 0; i < 4; i++) {
+    const oldPanX = panX;
+    const oldPanY = panY;
+    const base = projectPointToNdc(anchor);
+    if (!base) return false;
+    const errX = base.x - target.x;
+    const errY = base.y - target.y;
+    if (Math.hypot(errX, errY) < 1e-5) return true;
+    const step = Math.max(1e-4, dist * 1e-4);
+    panX += step;
+    const px = projectPointToNdc(anchor);
+    panX -= step;
+    panY += step;
+    const py = projectPointToNdc(anchor);
+    panY -= step;
+    if (!px || !py) return false;
+    const j00 = (px.x - base.x) / step;
+    const j10 = (px.y - base.y) / step;
+    const j01 = (py.x - base.x) / step;
+    const j11 = (py.y - base.y) / step;
+    const det = j00 * j11 - j01 * j10;
+    if (Math.abs(det) < 1e-10) return false;
+    const deltaX = (-errX * j11 + j01 * errY) / det;
+    const deltaY = (j10 * errX - j00 * errY) / det;
+    panX += deltaX;
+    panY += deltaY;
+    if (!Number.isFinite(panX) || !Number.isFinite(panY)) {
+      panX = oldPanX;
+      panY = oldPanY;
+      return false;
+    }
+  }
+  return true;
 }
 
 function sampleGrid(grid, values, x, y) {
@@ -800,6 +1064,7 @@ function refinedLayerId() {
   const strategy = blendStrategy();
   if (strategy === "naive") return "cloud_replacement";
   if (strategy === "blur") return "blur_blend";
+  if (strategy === "isprs_idw") return "isprs_idw_blend";
   if (strategy === "vertical_distance") return "vertical_distance_blend";
   return "distance_blend";
 }
@@ -898,6 +1163,7 @@ function updateProfileChart() {
   if (!current || profilePoints.length !== 2) return;
   if (!window.Chart) {
     metaEl.textContent = "Chart.js is not available; profile chart cannot be rendered.";
+    updateProfileStatus("Profile: chart unavailable");
     return;
   }
   const profile = buildProfileSamples(profilePoints[0], profilePoints[1]);
@@ -924,6 +1190,7 @@ function updateProfileChart() {
       plugins: {legend: {labels: {color: "#ddd"}}}
     }
   });
+  updateProfileStatus("Profile: complete");
 }
 
 function profileLineMesh() {
@@ -947,7 +1214,10 @@ function handleProfileClick(e) {
   if (profilePoints.length >= 2) profilePoints = [];
   profilePoints.push(point);
   if (profilePoints.length === 2) updateProfileChart();
-  else metaEl.textContent = "Profile tool: click the second point.";
+  else {
+    updateProfileStatus();
+    metaEl.textContent = "Profile tool: click the second point.";
+  }
 }
 
 function resize() {
@@ -1075,23 +1345,30 @@ document.getElementById("blendModal").addEventListener("click", e => {
     closeBlendModal();
   }
 });
+document.getElementById("openBlendInfo").addEventListener("click", openBlendInfoModal);
+document.getElementById("closeBlendInfo").addEventListener("click", closeBlendInfoModal);
+document.getElementById("blendInfoModal").addEventListener("click", e => {
+  if (e.target.id === "blendInfoModal") closeBlendInfoModal();
+});
 document.getElementById("resetBbox").addEventListener("click", () => {
   resetBboxToCloud();
 });
 document.getElementById("profileTool").addEventListener("click", () => {
   profileMode = !profileMode;
   profilePoints = [];
-  document.getElementById("profileTool").textContent = profileMode ? "Profile Tool: On" : "Profile Tool";
+  updateProfileStatus();
   metaEl.textContent = profileMode ? "Profile tool: click the first point." : "Profile tool disabled.";
 });
 document.getElementById("closeProfile").addEventListener("click", () => {
   document.getElementById("profilePanel").classList.remove("active");
   profilePoints = [];
+  updateProfileStatus();
   if (profileChart) {
     profileChart.destroy();
     profileChart = null;
   }
 });
+updateProfileStatus();
 loadInfo().then(() => loadMesh(INITIAL_LOD, "terrarium"));
 render();
 
