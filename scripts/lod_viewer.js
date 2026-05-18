@@ -1,6 +1,8 @@
 ﻿const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl", {antialias: true});
 if (!gl) throw new Error("WebGL unavailable");
+const fragDepthExt = gl.getExtension("EXT_frag_depth");
+if (!fragDepthExt) throw new Error("WebGL EXT_frag_depth unavailable");
 let current = null;
 let currentTerrainGrid = null;
 let currentCloudGrid = null;
@@ -71,6 +73,24 @@ const BLEND_METHOD_INFO = {
     parameters: "No additional blending parameters."
   }
 };
+let terrariumDepthBiasMeters = 0;
+let verticalExaggeration = 3.0;
+const DEPTH_BIAS_GLSL_SNIPPET = `// Vertex shader: visible geometry stays unchanged.
+vec4 viewPos = view * vec4(p, 1.0);
+vec4 clip = projection * viewPos;
+
+// depthBiasScene = terrariumDepthBiasMeters / scene.extent
+// Positive values move depth closer to the camera in this viewer.
+vec4 depthClip = projection * vec4(
+  viewPos.xy,
+  viewPos.z + depthBiasScene,
+  1.0
+);
+vDepth = depthClip.z / depthClip.w * 0.5 + 0.5;
+gl_Position = clip;
+
+// Fragment shader, WebGL 1 + EXT_frag_depth.
+gl_FragDepthEXT = clamp(vDepth, 0.0, 1.0);`;
 
 function updateProfileStatus(state = null) {
   const button = document.getElementById("profileTool");
@@ -102,22 +122,48 @@ function program(vs, fs) {
 
 const wireProgram = program(`
 attribute vec3 p;
-uniform mat4 mvp;
-void main() { gl_Position = mvp * vec4(p, 1.0); }
+uniform mat4 view;
+uniform mat4 projection;
+uniform float depthBiasScene;
+varying float vDepth;
+void main() {
+  vec4 viewPos = view * vec4(p, 1.0);
+  vec4 clip = projection * viewPos;
+  vec4 depthClip = projection * vec4(viewPos.xy, viewPos.z + depthBiasScene, 1.0);
+  vDepth = depthClip.z / depthClip.w * 0.5 + 0.5;
+  gl_Position = clip;
+}
 `, `
+#extension GL_EXT_frag_depth : enable
 precision mediump float;
 uniform vec3 color;
-void main() { gl_FragColor = vec4(color, 1.0); }
+varying float vDepth;
+void main() {
+  gl_FragColor = vec4(color, 1.0);
+  gl_FragDepthEXT = clamp(vDepth, 0.0, 1.0);
+}
 `);
 
 const phongProgram = program(`
 attribute vec3 p;
 attribute vec3 n;
-uniform mat4 mvp;
+uniform mat4 view;
+uniform mat4 projection;
+uniform float depthBiasScene;
 varying vec3 vn;
 varying vec3 vp;
-void main() { vn = normalize(n); vp = p; gl_Position = mvp * vec4(p, 1.0); }
+varying float vDepth;
+void main() {
+  vn = normalize(n);
+  vp = p;
+  vec4 viewPos = view * vec4(p, 1.0);
+  vec4 clip = projection * viewPos;
+  vec4 depthClip = projection * vec4(viewPos.xy, viewPos.z + depthBiasScene, 1.0);
+  vDepth = depthClip.z / depthClip.w * 0.5 + 0.5;
+  gl_Position = clip;
+}
 `, `
+#extension GL_EXT_frag_depth : enable
 precision mediump float;
 uniform vec3 color;
 uniform vec3 lightDir;
@@ -125,6 +171,7 @@ uniform float ambient;
 uniform float specularStrength;
 varying vec3 vn;
 varying vec3 vp;
+varying float vDepth;
 void main() {
   vec3 N = normalize(vn);
   vec3 L = normalize(lightDir);
@@ -134,6 +181,7 @@ void main() {
   float specular = pow(max(dot(R, V), 0.0), 24.0) * specularStrength;
   vec3 shaded = color * (ambient + (1.0 - ambient) * diffuse) + vec3(specular);
   gl_FragColor = vec4(shaded, 1.0);
+  gl_FragDepthEXT = clamp(vDepth, 0.0, 1.0);
 }
 `);
 
@@ -149,10 +197,13 @@ void main() { gl_FragColor = vec4(color, 1.0); }
 `);
 
 function finite(v) { return v !== null && Number.isFinite(v); }
+function sceneElevation(z) {
+  return (z - scene.cz) * verticalExaggeration / scene.extent;
+}
 function point(data, zs, i) {
   const x = i % data.nx;
   const y = Math.floor(i / data.nx);
-  return [(data.xs[x] - scene.cx) / scene.extent, (zs[i] - scene.cz) * 3.0 / scene.extent, (data.ys[y] - scene.cy) / scene.extent];
+  return [(data.xs[x] - scene.cx) / scene.extent, sceneElevation(zs[i]), (data.ys[y] - scene.cy) / scene.extent];
 }
 function buildLines(data, zs) {
   const lines = [];
@@ -220,13 +271,13 @@ function makeMesh(data, zs) {
 function makePointCloud(points) {
   const positions = [];
   for (const p of points || []) {
-    positions.push((p[0] - scene.cx) / scene.extent, (p[2] - scene.cz) * 3.0 / scene.extent, (p[1] - scene.cy) / scene.extent);
+    positions.push((p[0] - scene.cx) / scene.extent, sceneElevation(p[2]), (p[1] - scene.cy) / scene.extent);
   }
   return {pointBuffer: buffer(new Float32Array(positions)), pointCount: positions.length / 3};
 }
 
 function explicitPoint(p) {
-  return [(p[0] - scene.cx) / scene.extent, (p[2] - scene.cz) * 3.0 / scene.extent, (p[1] - scene.cy) / scene.extent];
+  return [(p[0] - scene.cx) / scene.extent, sceneElevation(p[2]), (p[1] - scene.cy) / scene.extent];
 }
 function makeQuadMesh(quads) {
   const lines = [];
@@ -386,6 +437,7 @@ function setSceneFrame(bbox) {
   scene.extent = bboxExtent(bbox) * 1.15;
   panX = 0;
   panY = 0;
+  panZ = 0;
   dist = 2.1;
 }
 
@@ -400,7 +452,7 @@ function rebuildMeshes() {
     blendedMesh = current.refined_mesh.geometry === "triangles" ? makeTriangleMesh(layer.triangles) : makeQuadMesh(layer.quads);
   }
   meshes = {
-    terrarium: {mesh: makeMesh(currentTerrainGrid, current.terrarium), color: [0.2, 0.55, 1.0], control: "showTerrarium"},
+    terrarium: {mesh: makeMesh(currentTerrainGrid, current.terrarium), color: [0.2, 0.55, 1.0], control: "showTerrarium", effect: "terrariumDepthBias"},
     cloud: {mesh: makeMesh(currentCloudGrid, currentCloudGrid.z), color: [1.0, 0.18, 0.15], control: "showCloud"},
     blended: {mesh: blendedMesh, color: [0.95, 0.70, 0.18], control: "showBlended"},
     points: {mesh: makePointCloud(current.point_sample), color: [0.32, 0.82, 0.45], control: "showPointCloud", kind: "points"}
@@ -533,6 +585,41 @@ function readBlendSettingsFromForm() {
   return settings;
 }
 
+function readTerrariumDepthBiasMeters() {
+  const input = document.getElementById("terrariumDepthBiasMeters");
+  const value = Number(input.value.replace(",", "."));
+  terrariumDepthBiasMeters = Number.isFinite(value) ? value : 0;
+}
+
+function setTerrariumDepthBiasMeters(value) {
+  terrariumDepthBiasMeters = Number.isFinite(value) ? value : 0;
+  document.getElementById("terrariumDepthBiasMeters").value = String(terrariumDepthBiasMeters);
+}
+
+function stepTerrariumDepthBiasMeters(delta) {
+  readTerrariumDepthBiasMeters();
+  setTerrariumDepthBiasMeters(terrariumDepthBiasMeters + delta);
+}
+
+function openDepthBiasInfoModal() {
+  document.getElementById("depthBiasCode").textContent = DEPTH_BIAS_GLSL_SNIPPET;
+  document.getElementById("depthBiasInfoModal").classList.add("active");
+}
+
+function closeDepthBiasInfoModal() {
+  document.getElementById("depthBiasInfoModal").classList.remove("active");
+}
+
+function readVerticalExaggeration() {
+  const input = document.getElementById("verticalExaggeration");
+  const value = Number(input.value);
+  verticalExaggeration = Number.isFinite(value) && value >= 0 ? value : 3.0;
+  if (current) {
+    profileSurfaceCache = null;
+    rebuildMeshes();
+  }
+}
+
 function writeBlendSettingsToForm(settings) {
   document.getElementById("blendStrategy").value = settings.strategy;
   document.getElementById("tessellationStrategy").value = settings.tessellation;
@@ -645,6 +732,13 @@ function formatBbox(bbox) {
   return `[${bbox.minx.toFixed(2)}, ${bbox.miny.toFixed(2)}, ${bbox.maxx.toFixed(2)}, ${bbox.maxy.toFixed(2)}]`;
 }
 
+function formatTerrainComparisonMetrics(metrics) {
+  if (!metrics || !metrics.samples || !finite(metrics.max_abs_vertical_distance_m)) {
+    return "Max vertical distance: n/a";
+  }
+  return `Max vertical distance: ${metrics.max_abs_vertical_distance_m.toFixed(3)} m | samples: ${metrics.samples}`;
+}
+
 function updateMetaText() {
   if (!current) return;
   const cloudGrid = current.cloud_layer;
@@ -661,7 +755,8 @@ function updateMetaText() {
   const cacheText = current.cloud_source && current.cloud_source.cache_hit ? " | cache hit" : "";
   const idw = current.isprs_idw_parameters || {};
   const idwText = blendStrategy() === "isprs_idw" ? `\nISPRS IDW: R ${Number(idw.transition_radius_m).toFixed(2)} m | p ${Number(idw.power).toFixed(2)} | N ${idw.neighbors}` : "";
-  metaEl.textContent = `Terrarium z${current.lod} | ${current.resolution_m.toFixed(2)} m/px | ${current.nx}x${current.ny}\nCloud DEM ${current.cloud_loaded ? "loaded" : "not loaded"}${cacheText} | fixed view ${cloudGrid.resolution_m.toFixed(2)} m/px | ${cloudGrid.nx}x${cloudGrid.ny}\nPoint Cloud sample: ${pointCount} points\nBlended DEM strategy: ${blendStrategyLabel()}\n${current.tiles.length} tiles | blend cloud cells: ${current.cloud_valid_count}\nBlend radius: ${current.blend_radius_m.toFixed(2)} m | blur radius: ${current.blur_radius_m.toFixed(2)} m${idwText}${refinementText}\nTerrarium DEM BBOX: ${formatBbox(current.bbox.terrarium_dem)}\nPoint Cloud BBOX: ${formatBbox(current.bbox.point_cloud)}`;
+  const comparisonText = formatTerrainComparisonMetrics(current.terrain_comparison_metrics);
+  metaEl.textContent = `Terrarium z${current.lod} | ${current.resolution_m.toFixed(2)} m/px | ${current.nx}x${current.ny}\nCloud DEM ${current.cloud_loaded ? "loaded" : "not loaded"}${cacheText} | fixed view ${cloudGrid.resolution_m.toFixed(2)} m/px | ${cloudGrid.nx}x${cloudGrid.ny}\nPoint Cloud sample: ${pointCount} points\n${comparisonText}\nBlended DEM strategy: ${blendStrategyLabel()}\n${current.tiles.length} tiles | blend cloud cells: ${current.cloud_valid_count}\nBlend radius: ${current.blend_radius_m.toFixed(2)} m | blur radius: ${current.blur_radius_m.toFixed(2)} m${idwText}${refinementText}\nTerrarium DEM BBOX: ${formatBbox(current.bbox.terrarium_dem)}\nPoint Cloud BBOX: ${formatBbox(current.bbox.point_cloud)}`;
 }
 
 async function loadMesh(forcedLod = null, frameTarget = null) {
@@ -769,40 +864,105 @@ async function loadCloudDem() {
   }
 }
 
-let yaw = -0.7, pitch = 0.8, dist = 2.1, panX = 0, panY = 0;
-let dragging = false, lastX = 0, lastY = 0, panning = false, terrainPanning = false, terrainPanAnchor = null, dragMoved = false;
+async function computeTerrariumErrorMap() {
+  if (!current) {
+    metaEl.textContent = "Terrarium DEM is not loaded yet.";
+    return;
+  }
+  const maxLodOption = Math.max(...Array.from(document.getElementById("lod").options).map(option => Number(option.value)));
+  if (current.lod >= maxLodOption) {
+    const message = `Cannot calculate a higher-resolution Terrarium error map for z${current.lod}: this is already the highest loaded LoD (z${maxLodOption}). Select a lower Terrarium LoD first.`;
+    showTerrariumErrorMessage(message);
+    metaEl.textContent = message;
+    return;
+  }
+  const button = document.getElementById("computeTerrariumError");
+  const bbox = current.bbox && current.bbox.terrarium_requested ? current.bbox.terrarium_requested : null;
+  const query = `z=${encodeURIComponent(current.lod)}&high_z=${encodeURIComponent(maxLodOption)}${bboxQueryString(bbox)}`;
+  button.disabled = true;
+  setBusy(true, `Waiting for backend: calculating Terrarium z${current.lod} error map...`);
+  metaEl.textContent = `Calculating Terrarium z${current.lod} error map against z${maxLodOption}...`;
+  try {
+    const result = await fetch(`/api/terrarium_error?${query}`).then(async r => {
+      if (!r.ok) throw new Error((await r.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || `HTTP ${r.status}`);
+      return r.json();
+    });
+    document.getElementById("terrariumLowHillshade").src = result.images.low_hillshade;
+    document.getElementById("terrariumHighHillshade").src = result.images.high_hillshade;
+    document.getElementById("terrariumErrorMap").src = result.images.error_map;
+    const metrics = result.metrics;
+    document.getElementById("terrariumErrorMeta").textContent =
+      `z${result.low_lod} (${result.low_resolution_m.toFixed(2)} m/px) vs z${result.high_lod} (${result.high_resolution_m.toFixed(2)} m/px)\n` +
+      `BBOX: ${formatBbox(result.bbox)}\n` +
+      `Samples: ${metrics.samples} | MAE: ${metrics.mean_abs_error_m.toFixed(3)} m | RMSE: ${metrics.rmse_m.toFixed(3)} m | Max: ${metrics.max_abs_error_m.toFixed(3)} m\n` +
+      `Artifacts:\n${result.outputs.low_hillshade_png}\n${result.outputs.high_hillshade_png}\n${result.outputs.error_map_png}\n${result.outputs.report_markdown}`;
+    document.getElementById("terrariumErrorPanel").classList.add("active");
+    metaEl.textContent = `Terrarium error map ready. Max absolute error: ${metrics.max_abs_error_m.toFixed(3)} m.`;
+  } catch (e) {
+    showTerrariumErrorMessage(e.message);
+    metaEl.textContent = `Failed: ${e.message}`;
+  } finally {
+    button.disabled = false;
+    setBusy(false);
+  }
+}
+
+function showTerrariumErrorMessage(message) {
+  document.getElementById("terrariumLowHillshade").removeAttribute("src");
+  document.getElementById("terrariumHighHillshade").removeAttribute("src");
+  document.getElementById("terrariumErrorMap").removeAttribute("src");
+  document.getElementById("terrariumErrorMeta").textContent = message;
+  document.getElementById("terrariumErrorPanel").classList.add("active");
+}
+
+let yaw = -0.7, pitch = 0.8, dist = 2.1, panX = 0, panY = 0, panZ = 0;
+let dragging = false, lastX = 0, lastY = 0, dragMode = "pan", dragAnchor = null, dragMoved = false;
 canvas.addEventListener("mousedown", e => {
+  if (e.button !== 0) return;
   dragging = true;
   dragMoved = false;
-  panning = e.shiftKey;
-  terrainPanning = e.ctrlKey;
-  terrainPanAnchor = terrainPanning ? terrainIntersectionFromEvent(e) : null;
-  if (terrainPanning && terrainPanAnchor) e.preventDefault();
+  dragMode = e.shiftKey ? "tilt" : (e.ctrlKey ? "rotate" : "pan");
+  dragAnchor = terrainIntersectionFromEvent(e);
+  if (dragAnchor) e.preventDefault();
   lastX = e.clientX;
   lastY = e.clientY;
 });
 window.addEventListener("mouseup", () => {
   dragging = false;
-  terrainPanning = false;
-  terrainPanAnchor = null;
+  dragAnchor = null;
 });
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
   const dx = e.clientX - lastX, dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
   if (Math.hypot(dx, dy) > 2) dragMoved = true;
-  if (terrainPanning && terrainPanAnchor) {
+  if (dragMode === "rotate") {
     e.preventDefault();
-    if (!panTerrainAnchorToEvent(terrainPanAnchor, e)) {
+    if (dragAnchor) rotateCameraAroundVerticalPivot(dragAnchor, dx * 0.008);
+    else yaw += dx * 0.008;
+  } else if (dragMode === "tilt") {
+    e.preventDefault();
+    pitch = Math.max(-1.45, Math.min(1.45, pitch + dy * 0.008));
+  } else {
+    e.preventDefault();
+    if (dragAnchor) {
+      if (!panTerrainAnchorToEvent(dragAnchor, e)) {
+        panX += dx / canvas.clientWidth * dist;
+        panZ -= dy / canvas.clientHeight * dist;
+      }
+    } else {
       panX += dx / canvas.clientWidth * dist;
-      panY -= dy / canvas.clientHeight * dist;
+      panZ -= dy / canvas.clientHeight * dist;
     }
   }
-  else if (terrainPanning) { panX += dx / canvas.clientWidth * dist; panY -= dy / canvas.clientHeight * dist; }
-  else if (panning) { panX += dx / canvas.clientWidth * dist; panY -= dy / canvas.clientHeight * dist; }
-  else { yaw += dx * 0.008; pitch = Math.max(-1.45, Math.min(1.45, pitch + dy * 0.008)); }
 });
-canvas.addEventListener("wheel", e => { e.preventDefault(); dist *= Math.exp(e.deltaY * 0.001); dist = Math.max(0.4, Math.min(12, dist)); }, {passive:false});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const zoomAnchor = terrainIntersectionFromEvent(e);
+  dist *= Math.exp(e.deltaY * 0.001);
+  dist = Math.max(0.4, Math.min(12, dist));
+  if (zoomAnchor) panTerrainAnchorToEvent(zoomAnchor, e);
+}, {passive:false});
 
 function sliderNumber(id) { return Number(document.getElementById(id).value); }
 function updateSliderLabels() {
@@ -858,8 +1018,8 @@ function transform4(m, v) {
 
 function currentMvp() {
   const aspect = canvas.width / Math.max(canvas.height, 1);
-  const eye = [Math.sin(yaw)*Math.cos(pitch)*dist + panX, Math.sin(pitch)*dist + panY, Math.cos(yaw)*Math.cos(pitch)*dist];
-  const center = [panX, panY, 0];
+  const eye = [Math.sin(yaw)*Math.cos(pitch)*dist + panX, Math.sin(pitch)*dist + panY, Math.cos(yaw)*Math.cos(pitch)*dist + panZ];
+  const center = [panX, panY, panZ];
   return matMul(perspective(Math.PI/4, aspect, 0.01, 100), lookAt(eye, center, [0,1,0]));
 }
 
@@ -895,7 +1055,7 @@ function screenToMapPoint(e) {
 }
 
 function normalizedTerrainPoint(x, y, z) {
-  return [(x - scene.cx) / scene.extent, (z - scene.cz) * 3.0 / scene.extent, (y - scene.cy) / scene.extent];
+  return [(x - scene.cx) / scene.extent, sceneElevation(z), (y - scene.cy) / scene.extent];
 }
 
 function rayTriangleIntersection(origin, direction, a, b, c) {
@@ -969,11 +1129,21 @@ function projectPointToNdc(point) {
   return {x: clip[0] / clip[3], y: clip[1] / clip[3]};
 }
 
+function rotateCameraAroundVerticalPivot(pivot, angle) {
+  const cosA = Math.cos(angle);
+  const sinA = Math.sin(angle);
+  const dx = panX - pivot[0];
+  const dz = panZ - pivot[2];
+  panX = pivot[0] + dx * cosA + dz * sinA;
+  panZ = pivot[2] - dx * sinA + dz * cosA;
+  yaw += angle;
+}
+
 function panTerrainAnchorToEvent(anchor, e) {
   const target = eventToNdc(e);
   for (let i = 0; i < 4; i++) {
     const oldPanX = panX;
-    const oldPanY = panY;
+    const oldPanZ = panZ;
     const base = projectPointToNdc(anchor);
     if (!base) return false;
     const errX = base.x - target.x;
@@ -983,23 +1153,23 @@ function panTerrainAnchorToEvent(anchor, e) {
     panX += step;
     const px = projectPointToNdc(anchor);
     panX -= step;
-    panY += step;
-    const py = projectPointToNdc(anchor);
-    panY -= step;
-    if (!px || !py) return false;
+    panZ += step;
+    const pz = projectPointToNdc(anchor);
+    panZ -= step;
+    if (!px || !pz) return false;
     const j00 = (px.x - base.x) / step;
     const j10 = (px.y - base.y) / step;
-    const j01 = (py.x - base.x) / step;
-    const j11 = (py.y - base.y) / step;
+    const j01 = (pz.x - base.x) / step;
+    const j11 = (pz.y - base.y) / step;
     const det = j00 * j11 - j01 * j10;
     if (Math.abs(det) < 1e-10) return false;
     const deltaX = (-errX * j11 + j01 * errY) / det;
-    const deltaY = (j10 * errX - j00 * errY) / det;
+    const deltaZ = (j10 * errX - j00 * errY) / det;
     panX += deltaX;
-    panY += deltaY;
-    if (!Number.isFinite(panX) || !Number.isFinite(panY)) {
+    panZ += deltaZ;
+    if (!Number.isFinite(panX) || !Number.isFinite(panZ)) {
       panX = oldPanX;
-      panY = oldPanY;
+      panZ = oldPanZ;
       return false;
     }
   }
@@ -1197,7 +1367,7 @@ function profileLineMesh() {
   if (profilePoints.length !== 2 || !current) return null;
   const points = profilePoints.map(p => {
     const z = sampleGrid(currentTerrainGrid, currentBlendValues(), p.x, p.y);
-    return [(p.x - scene.cx) / scene.extent, ((finite(z) ? z : scene.cz) - scene.cz + 2.0) * 3.0 / scene.extent, (p.y - scene.cy) / scene.extent];
+    return [(p.x - scene.cx) / scene.extent, sceneElevation((finite(z) ? z : scene.cz) + 2.0), (p.y - scene.cy) / scene.extent];
   });
   if (!profileLineBuffer) profileLineBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, profileLineBuffer);
@@ -1233,18 +1403,27 @@ function lookAt(eye, center, up){
   let yx=zy*xz-zz*xy, yy=zz*xx-zx*xz, yz=zx*xy-zy*xx;
   return new Float32Array([xx,yx,zx,0, xy,yy,zy,0, xz,yz,zz,0, -(xx*eye[0]+xy*eye[1]+xz*eye[2]), -(yx*eye[0]+yy*eye[1]+yz*eye[2]), -(zx*eye[0]+zy*eye[1]+zz*eye[2]), 1]);
 }
+function depthBiasSceneForLayer(layer) {
+  if (layer.effect !== "terrariumDepthBias") return 0.0;
+  return Number.isFinite(terrariumDepthBiasMeters) ? terrariumDepthBiasMeters / scene.extent : 0.0;
+}
+function setDepthProgramUniforms(programObject, projection, view, depthBiasScene) {
+  gl.uniformMatrix4fv(gl.getUniformLocation(programObject, "projection"), false, projection);
+  gl.uniformMatrix4fv(gl.getUniformLocation(programObject, "view"), false, view);
+  gl.uniform1f(gl.getUniformLocation(programObject, "depthBiasScene"), depthBiasScene);
+}
 function selectedLayers() { return Object.values(meshes).filter(layer => document.getElementById(layer.control).checked); }
-function drawWire(layer, mvp) {
+function drawWire(layer, projection, view) {
   gl.useProgram(wireProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, layer.mesh.lineBuffer);
   const pLoc = gl.getAttribLocation(wireProgram, "p");
   gl.vertexAttribPointer(pLoc, 3, gl.FLOAT, false, 0, 0);
   gl.enableVertexAttribArray(pLoc);
-  gl.uniformMatrix4fv(gl.getUniformLocation(wireProgram, "mvp"), false, mvp);
+  setDepthProgramUniforms(wireProgram, projection, view, depthBiasSceneForLayer(layer));
   gl.uniform3fv(gl.getUniformLocation(wireProgram, "color"), new Float32Array(layer.color));
   gl.drawArrays(gl.LINES, 0, layer.mesh.lineCount);
 }
-function drawShaded(layer, mvp, normalBuffer) {
+function drawShaded(layer, projection, view, normalBuffer) {
   gl.useProgram(phongProgram);
   const pLoc = gl.getAttribLocation(phongProgram, "p");
   const nLoc = gl.getAttribLocation(phongProgram, "n");
@@ -1254,15 +1433,15 @@ function drawShaded(layer, mvp, normalBuffer) {
   gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
   gl.vertexAttribPointer(nLoc, 3, gl.FLOAT, false, 0, 0);
   gl.enableVertexAttribArray(nLoc);
-  gl.uniformMatrix4fv(gl.getUniformLocation(phongProgram, "mvp"), false, mvp);
+  setDepthProgramUniforms(phongProgram, projection, view, depthBiasSceneForLayer(layer));
   gl.uniform3fv(gl.getUniformLocation(phongProgram, "color"), new Float32Array(layer.color));
   gl.uniform3fv(gl.getUniformLocation(phongProgram, "lightDir"), new Float32Array(sunDirection()));
   gl.uniform1f(gl.getUniformLocation(phongProgram, "ambient"), sliderNumber("ambient") / 100);
   gl.uniform1f(gl.getUniformLocation(phongProgram, "specularStrength"), sliderNumber("specular") / 100);
   gl.drawArrays(gl.TRIANGLES, 0, layer.mesh.triCount);
 }
-function drawFlat(layer, mvp) { drawShaded(layer, mvp, layer.mesh.flatNormalBuffer); }
-function drawPhong(layer, mvp) { drawShaded(layer, mvp, layer.mesh.normalBuffer); }
+function drawFlat(layer, projection, view) { drawShaded(layer, projection, view, layer.mesh.flatNormalBuffer); }
+function drawPhong(layer, projection, view) { drawShaded(layer, projection, view, layer.mesh.normalBuffer); }
 function drawPoints(layer, mvp) {
   gl.useProgram(pointProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, layer.mesh.pointBuffer);
@@ -1280,23 +1459,35 @@ function render() {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
   const aspect = canvas.width / Math.max(canvas.height, 1);
-  const eye = [Math.sin(yaw)*Math.cos(pitch)*dist + panX, Math.sin(pitch)*dist + panY, Math.cos(yaw)*Math.cos(pitch)*dist];
-  const center = [panX, panY, 0];
-  const mvp = matMul(perspective(Math.PI/4, aspect, 0.01, 100), lookAt(eye, center, [0,1,0]));
+  const eye = [Math.sin(yaw)*Math.cos(pitch)*dist + panX, Math.sin(pitch)*dist + panY, Math.cos(yaw)*Math.cos(pitch)*dist + panZ];
+  const center = [panX, panY, panZ];
+  const projection = perspective(Math.PI/4, aspect, 0.01, 100);
+  const view = lookAt(eye, center, [0,1,0]);
+  const mvp = matMul(projection, view);
   const mode = document.getElementById("mode").value;
   for (const layer of selectedLayers()) {
     if (layer.kind === "points") drawPoints(layer, mvp);
-    else if (mode === "phong") drawPhong(layer, mvp);
-    else if (mode === "flat") drawFlat(layer, mvp);
-    else drawWire(layer, mvp);
+    else if (mode === "phong") drawPhong(layer, projection, view);
+    else if (mode === "flat") drawFlat(layer, projection, view);
+    else drawWire(layer, projection, view);
   }
   const profileLine = profileLineMesh();
-  if (profileLine) drawWire({mesh: profileLine, color: [0.32, 0.95, 0.45]}, mvp);
+  if (profileLine) drawWire({mesh: profileLine, color: [0.32, 0.95, 0.45]}, projection, view);
   requestAnimationFrame(render);
 }
 canvas.addEventListener("click", handleProfileClick);
 document.getElementById("frameCloud").addEventListener("click", framePointCloud);
 document.getElementById("frameTerrarium").addEventListener("click", frameTerrarium);
+document.getElementById("computeTerrariumError").addEventListener("click", computeTerrariumErrorMap);
+document.getElementById("terrariumDepthBiasMeters").addEventListener("input", readTerrariumDepthBiasMeters);
+document.getElementById("decreaseTerrariumDepthBias").addEventListener("click", () => stepTerrariumDepthBiasMeters(-1));
+document.getElementById("increaseTerrariumDepthBias").addEventListener("click", () => stepTerrariumDepthBiasMeters(1));
+document.getElementById("openDepthBiasInfo").addEventListener("click", openDepthBiasInfoModal);
+document.getElementById("closeDepthBiasInfo").addEventListener("click", closeDepthBiasInfoModal);
+document.getElementById("depthBiasInfoModal").addEventListener("click", e => {
+  if (e.target.id === "depthBiasInfoModal") closeDepthBiasInfoModal();
+});
+document.getElementById("verticalExaggeration").addEventListener("input", readVerticalExaggeration);
 document.getElementById("openCloudSettings").addEventListener("click", openCloudModal);
 document.getElementById("acceptCloudSettings").addEventListener("click", loadCloudDem);
 document.getElementById("cancelCloudSettings").addEventListener("click", () => {
@@ -1367,6 +1558,9 @@ document.getElementById("closeProfile").addEventListener("click", () => {
     profileChart.destroy();
     profileChart = null;
   }
+});
+document.getElementById("closeTerrariumError").addEventListener("click", () => {
+  document.getElementById("terrariumErrorPanel").classList.remove("active");
 });
 updateProfileStatus();
 loadInfo().then(() => loadMesh(INITIAL_LOD, "terrarium"));

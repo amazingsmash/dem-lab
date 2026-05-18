@@ -1,7 +1,10 @@
 ﻿from __future__ import annotations
 
 import argparse
+import base64
+import datetime as dt
 import hashlib
+import io
 import json
 import heapq
 import math
@@ -643,6 +646,28 @@ class TerrainContext:
         blended[valid] = cloud[valid]
         return blended
 
+    def terrain_comparison_metrics(self, cloud: np.ndarray, terrarium: np.ndarray) -> dict[str, Any]:
+        valid = np.isfinite(cloud) & np.isfinite(terrarium)
+        samples = int(valid.sum())
+        if samples == 0:
+            return {
+                "samples": 0,
+                "max_abs_vertical_distance_m": None,
+                "signed_vertical_distance_at_max_m": None,
+                "formula": "max(abs(z_cloud_dem - z_terrarium)) over cells where both models are finite",
+                "validity_mask": "finite Cloud DEM and finite Terrarium DEM samples on the selected Terrarium grid",
+            }
+        diff = cloud[valid] - terrarium[valid]
+        abs_diff = np.abs(diff)
+        max_index = int(np.argmax(abs_diff))
+        return {
+            "samples": samples,
+            "max_abs_vertical_distance_m": round(float(abs_diff[max_index]), 6),
+            "signed_vertical_distance_at_max_m": round(float(diff[max_index]), 6),
+            "formula": "max(abs(z_cloud_dem - z_terrarium)) over cells where both models are finite",
+            "validity_mask": "finite Cloud DEM and finite Terrarium DEM samples on the selected Terrarium grid",
+        }
+
     def sample_regular_grid(self, values: np.ndarray, xs: np.ndarray, ys: np.ndarray, x: float, y: float) -> float:
         if values.size == 0 or len(xs) == 0 or len(ys) == 0:
             return float("nan")
@@ -832,6 +857,225 @@ class TerrainContext:
         top = (1.0 - tx) * float(values[r0, c0]) + tx * float(values[r0, c1])
         bottom = (1.0 - tx) * float(values[r1, c0]) + tx * float(values[r1, c1])
         return (1.0 - ty) * top + ty * bottom
+
+    def triangle_sample(self, values: np.ndarray, xs: np.ndarray, ys: np.ndarray, x: float, y: float) -> float:
+        ny, nx = values.shape
+        if nx < 2 or ny < 2:
+            return self.bilinear_sample(values, xs, ys, x, y)
+        dx = abs(float(xs[1] - xs[0]))
+        dy = abs(float(ys[1] - ys[0]))
+        col = np.clip((x - float(xs[0])) / dx, 0.0, nx - 1.0)
+        row = np.clip((float(ys[0]) - y) / dy, 0.0, ny - 1.0)
+        c0 = min(int(math.floor(col)), nx - 2)
+        r0 = min(int(math.floor(row)), ny - 2)
+        u = float(col - c0)
+        v = float(row - r0)
+        z00 = float(values[r0, c0])
+        z10 = float(values[r0, c0 + 1])
+        z01 = float(values[r0 + 1, c0])
+        z11 = float(values[r0 + 1, c0 + 1])
+        if u + v <= 1.0:
+            return z00 + u * (z10 - z00) + v * (z01 - z00)
+        return z11 + (1.0 - u) * (z01 - z11) + (1.0 - v) * (z10 - z11)
+
+    def crop_grid_to_bounds(
+        self, xs: np.ndarray, ys: np.ndarray, values: np.ndarray, bounds: tuple[float, float, float, float]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        minx, miny, maxx, maxy = bounds
+        cols = np.where((xs >= minx) & (xs <= maxx))[0]
+        rows = np.where((ys >= miny) & (ys <= maxy))[0]
+        if cols.size == 0:
+            center_x = (minx + maxx) / 2.0
+            cols = np.asarray([int(np.argmin(np.abs(xs - center_x)))])
+        if rows.size == 0:
+            center_y = (miny + maxy) / 2.0
+            rows = np.asarray([int(np.argmin(np.abs(ys - center_y)))])
+        return xs[cols], ys[rows], values[np.ix_(rows, cols)]
+
+    def hillshade_image(self, values: np.ndarray, resolution: float) -> Image.Image:
+        finite = np.isfinite(values)
+        filled = values.astype(np.float32, copy=True)
+        if finite.any():
+            filled[~finite] = float(np.nanmean(filled[finite]))
+        else:
+            filled[:] = 0.0
+        if filled.shape[0] < 2 or filled.shape[1] < 2:
+            if finite.any():
+                vmin = float(np.nanmin(filled[finite]))
+                vmax = float(np.nanmax(filled[finite]))
+                if vmax > vmin:
+                    gray = (filled - vmin) / (vmax - vmin)
+                else:
+                    gray = np.full(filled.shape, 0.5, dtype=np.float32)
+            else:
+                gray = np.full(filled.shape, 0.5, dtype=np.float32)
+            return Image.fromarray(np.round(np.clip(gray, 0.0, 1.0) * 255.0).astype(np.uint8), mode="L")
+        gy, gx = np.gradient(filled, resolution, resolution)
+        azimuth = math.radians(315.0)
+        altitude = math.radians(45.0)
+        slope = np.pi / 2.0 - np.arctan(np.hypot(gx, gy))
+        aspect = np.arctan2(-gx, gy)
+        shaded = np.sin(altitude) * np.sin(slope) + np.cos(altitude) * np.cos(slope) * np.cos(azimuth - aspect)
+        shaded = np.clip((shaded + 1.0) / 2.0, 0.0, 1.0)
+        return Image.fromarray(np.round(shaded * 255.0).astype(np.uint8), mode="L")
+
+    def error_image(self, error: np.ndarray) -> tuple[Image.Image, float]:
+        finite = np.isfinite(error)
+        max_error = float(np.nanmax(error[finite])) if finite.any() else 0.0
+        norm = np.zeros(error.shape, dtype=np.float32)
+        if max_error > 0.0:
+            norm[finite] = np.clip(error[finite] / max_error, 0.0, 1.0)
+        rgb = np.zeros((*error.shape, 3), dtype=np.uint8)
+        rgb[:, :, 0] = np.round(norm * 255.0).astype(np.uint8)
+        rgb[:, :, 2] = np.round((1.0 - norm) * 255.0).astype(np.uint8)
+        rgb[~finite] = (0, 0, 0)
+        return Image.fromarray(rgb, mode="RGB"), max_error
+
+    def image_data_url(self, image: Image.Image) -> str:
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def terrarium_error_map(
+        self,
+        z: int,
+        high_z: int | None = None,
+        bounds: tuple[float, float, float, float] | None = None,
+        max_pixels: int = 4_000_000,
+    ) -> dict[str, Any]:
+        start = time.perf_counter()
+        if high_z is None:
+            high_z = self.max_lod
+        if high_z <= z:
+            raise ValueError("High-resolution LoD must be greater than the selected LoD")
+        requested_bounds = bounds if bounds is not None else self.terrarium_bounds
+        high_tiles = self.covering_tiles(high_z, requested_bounds)
+        high_pixel_count = len(high_tiles) * 256 * 256
+        if high_pixel_count > max_pixels:
+            raise ValueError(
+                f"High-resolution comparison would need {high_pixel_count} pixels from {len(high_tiles)} tiles; "
+                f"limit is {max_pixels}. Use a smaller BBOX or a lower high_z."
+            )
+
+        low_grid = self.terrarium_grid(z, requested_bounds)
+        high_grid = self.terrarium_grid(high_z, requested_bounds)
+        low_xs, low_ys, low = self.crop_grid_to_bounds(
+            low_grid["xs"], low_grid["ys"], low_grid["terrarium"], requested_bounds
+        )
+        high_xs, high_ys, high = self.crop_grid_to_bounds(
+            high_grid["xs"], high_grid["ys"], high_grid["terrarium"], requested_bounds
+        )
+        low_interp = np.empty(high.shape, dtype=np.float32)
+        for row, y in enumerate(high_ys):
+            for col, x in enumerate(high_xs):
+                low_interp[row, col] = self.triangle_sample(low_grid["terrarium"], low_grid["xs"], low_grid["ys"], float(x), float(y))
+        error = np.abs(high - low_interp)
+
+        low_hillshade = self.hillshade_image(low, float(low_grid["resolution"]))
+        high_hillshade = self.hillshade_image(high, float(high_grid["resolution"]))
+        error_png, max_error = self.error_image(error)
+
+        run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        run_dir = self.out_dir / "terrarium_error_maps" / f"z{z}_to_z{high_z}_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        low_path = run_dir / "terrarium_low_hillshade.png"
+        high_path = run_dir / "terrarium_high_hillshade.png"
+        error_path = run_dir / "terrarium_error_map.png"
+        low_hillshade.save(low_path)
+        high_hillshade.save(high_path)
+        error_png.save(error_path)
+
+        finite = np.isfinite(error)
+        samples = int(finite.sum())
+        metrics = {
+            "samples": samples,
+            "max_abs_error_m": round(max_error, 6),
+            "mean_abs_error_m": round(float(np.nanmean(error[finite])) if samples else 0.0, 6),
+            "rmse_m": round(float(np.sqrt(np.nanmean(np.square(error[finite])))) if samples else 0.0, 6),
+        }
+        report = {
+            "objective": "Calculate the Terrarium LoD error map visible in the viewer by comparing high-resolution Terrarium elevations against elevations interpolated on the selected low-resolution Terrarium triangle mesh.",
+            "assumptions": {
+                "input_crs": "EPSG:3857 Web Mercator for Terrarium tile coordinates",
+                "output_crs": "EPSG:3857",
+                "height_units": "meters",
+                "low_mesh_interpolation": "Piecewise planar interpolation over the regular Terrarium triangle mesh with cell split matching the WebGL viewer: upper-left triangle and lower-right triangle.",
+            },
+            "inputs": {
+                "low_lod": z,
+                "high_lod": high_z,
+                "bbox_3857": requested_bounds,
+                "low_tiles": low_grid["tiles"],
+                "high_tiles": high_grid["tiles"],
+            },
+            "outputs": {
+                "low_hillshade_png": str(low_path),
+                "high_hillshade_png": str(high_path),
+                "error_map_png": str(error_path),
+            },
+            "parameters": {
+                "low_resolution_m_per_pixel": float(low_grid["resolution"]),
+                "high_resolution_m_per_pixel": float(high_grid["resolution"]),
+                "rasterization_resolution": "Native Terrarium tile pixel centers at each LoD; no rasterization from vector data.",
+                "per_pixel_aggregation_rule": "Terrarium source elevation per tile pixel; no aggregation.",
+                "validity_mask": "Finite high-resolution Terrarium samples inside the requested BBOX.",
+                "comparison_formula": "abs(z_high_terrarium - z_low_triangle_interpolated)",
+                "error_colormap": "blue = 0 m, red = max absolute error in this run",
+            },
+            "metrics": metrics,
+            "runtime_seconds": round(time.perf_counter() - start, 3),
+            "warnings": [],
+            "errors": [],
+        }
+        json_path = run_dir / "terrarium_error_report.json"
+        md_path = run_dir / "terrarium_error_report.md"
+        json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        md_path.write_text(
+            "\n".join(
+                [
+                    "# Terrarium LoD Error Map",
+                    "",
+                    f"- Objective: {report['objective']}",
+                    "- Input CRS: `EPSG:3857`; output CRS: `EPSG:3857`.",
+                    f"- Low LoD: `z{z}` at `{low_grid['resolution']:.6f} m/px`.",
+                    f"- High LoD: `z{high_z}` at `{high_grid['resolution']:.6f} m/px`.",
+                    f"- BBOX EPSG:3857: `{list(requested_bounds)}`.",
+                    "- Validity mask: finite high-resolution Terrarium samples inside the requested BBOX.",
+                    "- Formula: `abs(z_high_terrarium - z_low_triangle_interpolated)`.",
+                    f"- Samples: `{metrics['samples']}`.",
+                    f"- Mean absolute error: `{metrics['mean_abs_error_m']} m`.",
+                    f"- RMSE: `{metrics['rmse_m']} m`.",
+                    f"- Max absolute error: `{metrics['max_abs_error_m']} m`.",
+                    "",
+                    "## Artifacts",
+                    f"- Low hillshade: `{low_path}`",
+                    f"- High hillshade: `{high_path}`",
+                    f"- Error map: `{error_path}`",
+                    f"- JSON report: `{json_path}`",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        report["outputs"]["report_json"] = str(json_path)
+        report["outputs"]["report_markdown"] = str(md_path)
+        return {
+            "low_lod": z,
+            "high_lod": high_z,
+            "bbox": self.bbox_dict(requested_bounds),
+            "low_resolution_m": float(low_grid["resolution"]),
+            "high_resolution_m": float(high_grid["resolution"]),
+            "low_shape": {"nx": int(low.shape[1]), "ny": int(low.shape[0])},
+            "high_shape": {"nx": int(high.shape[1]), "ny": int(high.shape[0])},
+            "metrics": metrics,
+            "images": {
+                "low_hillshade": self.image_data_url(low_hillshade),
+                "high_hillshade": self.image_data_url(high_hillshade),
+                "error_map": self.image_data_url(error_png),
+            },
+            "outputs": report["outputs"],
+            "elapsed_seconds": report["runtime_seconds"],
+        }
 
     def nearest_cloud_value(
         self, cloud: np.ndarray, cloud_xs: np.ndarray, cloud_ys: np.ndarray, x: float, y: float
@@ -1545,6 +1789,7 @@ class TerrainContext:
             "isprs_idw_blend": np.round(isprs_idw.reshape(-1), 3).tolist(),
             "cloud_layer": self.fixed_cloud_layer(),
             "cloud_valid_count": int(np.isfinite(cloud).sum()),
+            "terrain_comparison_metrics": self.terrain_comparison_metrics(cloud, terrarium),
             "blend_radius_m": radius,
             "blur_radius_m": blur_radius,
             "isprs_idw_parameters": {
@@ -1718,6 +1963,52 @@ class Handler(BaseHTTPRequestHandler):
                     terrarium_bounds=terrarium_bounds,
                 )
             )
+            return
+        if parsed.path == "/api/terrarium_error":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                z = int(query.get("z", ["10"])[0])
+                high_z = int(query.get("high_z", [str(self.context.max_lod)])[0])
+                max_pixels = int(query.get("max_pixels", ["4000000"])[0])
+            except ValueError:
+                self.send_error(400, "z, high_z, and max_pixels must be integers")
+                return
+            if z < 0 or z > self.context.max_lod or high_z < 0 or high_z > self.context.max_lod:
+                self.send_error(400, f"LoD values must be between 0 and {self.context.max_lod}")
+                return
+            terrarium_bounds = None
+            bbox_keys = ("bbox_minx", "bbox_miny", "bbox_maxx", "bbox_maxy")
+            if any(key in query for key in bbox_keys):
+                if not all(key in query for key in bbox_keys):
+                    self.send_error(400, "Terrarium BBOX requires bbox_minx, bbox_miny, bbox_maxx, and bbox_maxy")
+                    return
+                try:
+                    minx = float(query["bbox_minx"][0])
+                    miny = float(query["bbox_miny"][0])
+                    maxx = float(query["bbox_maxx"][0])
+                    maxy = float(query["bbox_maxy"][0])
+                except ValueError:
+                    self.send_error(400, "Terrarium BBOX values must be numbers")
+                    return
+                if not all(math.isfinite(v) for v in (minx, miny, maxx, maxy)):
+                    self.send_error(400, "Terrarium BBOX values must be finite")
+                    return
+                if minx >= maxx or miny >= maxy:
+                    self.send_error(400, "Terrarium BBOX min values must be lower than max values")
+                    return
+                if (
+                    minx < -WEB_MERCATOR_HALF_WORLD
+                    or maxx > WEB_MERCATOR_HALF_WORLD
+                    or miny < -WEB_MERCATOR_HALF_WORLD
+                    or maxy > WEB_MERCATOR_HALF_WORLD
+                ):
+                    self.send_error(400, "Terrarium BBOX must be inside EPSG:3857 Web Mercator bounds")
+                    return
+                terrarium_bounds = (minx, miny, maxx, maxy)
+            try:
+                self.json_response(self.context.terrarium_error_map(z, high_z, terrarium_bounds, max_pixels))
+            except Exception as exc:
+                self.send_error(400, str(exc))
             return
         self.send_error(404)
 

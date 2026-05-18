@@ -1,0 +1,73 @@
+{
+  "objective": "Expose vertical exaggeration as an Effects control and correct terrain drag so zenithal views pan across the scene instead of changing camera height.",
+  "assumptions": {
+    "vertical_exaggeration_scope": "Visualization only",
+    "height_units": "DEM elevations remain meters",
+    "input_crs": "EPSG:3857 viewer terrain coordinates",
+    "output_crs": "EPSG:3857 viewer terrain coordinates"
+  },
+  "inputs": [
+    "Selected DEM grids",
+    "Point cloud sample",
+    "Refined blend geometry when active",
+    "Vertical exaggeration UI value",
+    "Mouse drag events"
+  ],
+  "outputs": [
+    "Viewer meshes rebuilt with current vertical exaggeration",
+    "Raycast terrain geometry updated with current vertical exaggeration",
+    "Camera pan solved in the horizontal panX/panZ plane"
+  ],
+  "parameters": {
+    "default_vertical_exaggeration": 3.0,
+    "accepted_vertical_exaggeration": "Non-negative finite number",
+    "invalid_vertical_exaggeration": "Falls back to 3.0",
+    "scene_elevation_formula": "(z - scene.cz) * verticalExaggeration / scene.extent",
+    "planar_pan_unknowns": [
+      "panX",
+      "panZ"
+    ]
+  },
+  "geospatial_data": {
+    "input_crs": "EPSG:3857",
+    "output_crs": "EPSG:3857",
+    "rasterization_resolution": "Unchanged",
+    "per_pixel_aggregation_rule": "Unchanged",
+    "validity_mask": "Unchanged",
+    "metrics_recomputed": false
+  },
+  "visualization": {
+    "affected_geometry": [
+      "Terrarium DEM mesh",
+      "Cloud DEM mesh",
+      "Blended DEM mesh",
+      "Point cloud sample",
+      "Profile line",
+      "Raycast terrain triangles"
+    ],
+    "camera_pan": "Terrain-anchored drag solves panX and panZ; panY is no longer modified by plain drag."
+  },
+  "runtime": {
+    "experiment_generated": false,
+    "artifacts": []
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "Get-Content -Path .\\scripts\\lod_viewer.js -Raw | node --check -",
+        "status": "passed",
+        "node_version": "v18.15.0"
+      }
+    ]
+  },
+  "changed_files": [
+    "scripts/lod_viewer.html",
+    "scripts/lod_viewer.js",
+    "docs/developments/vertical_exaggeration_and_planar_pan_2026-05-18.md",
+    "docs/developments/vertical_exaggeration_and_planar_pan_2026-05-18.json"
+  ],
+  "warnings": [
+    "Changing vertical exaggeration rebuilds viewer buffers but does not re-fetch or recompute DEM data."
+  ],
+  "errors": []
+}

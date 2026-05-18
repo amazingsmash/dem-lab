@@ -1,0 +1,71 @@
+{
+  "development": "Vertical Pivot Rotation",
+  "date": "2026-05-11",
+  "objective": "Correct Ctrl+drag so rotation is around the clicked terrain pivot with the scene vertical up vector as the rotation axis.",
+  "assumptions": {
+    "scene_axes": "x and z are horizontal, y is elevation/up.",
+    "rotation_axis": "Scene y axis through the terrain pivot.",
+    "ctrl_drag_horizontal_motion": "Mouse dx controls yaw rotation around the vertical axis.",
+    "ctrl_drag_vertical_motion": "Mouse dy is ignored for this rotation mode because the requested rotation axis is vertical only."
+  },
+  "inputs": {
+    "pivot": "Ray intersection with current blended terrain mesh.",
+    "camera_target": [
+      "panX",
+      "panY",
+      "panZ"
+    ],
+    "camera_angles": [
+      "yaw",
+      "pitch"
+    ],
+    "mouse_delta": "dx"
+  },
+  "outputs": {
+    "camera_state_added": "panZ",
+    "modified_behavior": "Ctrl+drag orbits camera target and eye around the vertical line through the terrain pivot.",
+    "modified_files": [
+      "scripts/lod_viewer.js"
+    ]
+  },
+  "parameters": {
+    "rotation_angle": "dx * 0.008",
+    "rotation_axis": "vertical scene y axis"
+  },
+  "crs": {
+    "input_crs": "Unchanged from loaded viewer experiment, normally EPSG:3857",
+    "output_crs": "Unchanged, EPSG:3857 viewer grid",
+    "crs_inference": "No new geospatial input was introduced."
+  },
+  "rasterization": {
+    "resolution": "Unchanged; uses the already-loaded viewer mesh resolution",
+    "aggregation_rule": "Unchanged; minimum z for Cloud DEM rasterization in the project pipeline",
+    "validity_mask": "Finite cells in the selected blended surface"
+  },
+  "metrics": {
+    "computed": false,
+    "reason": "Viewer interaction-only change.",
+    "formula": "Not applicable for this UI interaction change.",
+    "samples": 0
+  },
+  "runtime": {
+    "errors": [],
+    "warnings": [],
+    "dependency_versions": {
+      "node": "18.15.0"
+    },
+    "verification": [
+      "python -m json.tool docs\\developments\\vertical_pivot_rotation_2026-05-11.json",
+      "Get-Content -Raw scripts\\lod_viewer.js | node --check",
+      "Static content checks for panZ state, camera center panZ, vertical pivot rotation function, Ctrl+drag call site, and no pitch update in Ctrl+drag"
+    ]
+  },
+  "artifacts": {
+    "generated": [
+      "docs/developments/vertical_pivot_rotation_2026-05-11.md",
+      "docs/developments/vertical_pivot_rotation_2026-05-11.json"
+    ],
+    "original_data_modified": false,
+    "subfolders_processed": false
+  }
+}

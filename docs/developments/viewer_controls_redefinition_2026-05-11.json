@@ -1,0 +1,87 @@
+{
+  "development": "Viewer Controls Redefinition",
+  "date": "2026-05-11",
+  "objective": "Redefine mouse controls so drag pans with terrain anchoring, wheel zooms toward the terrain intersection under the pointer, Ctrl+drag rotates around the clicked terrain pivot, and Shift+drag remains terrain-anchored pan.",
+  "assumptions": {
+    "pivot": "Nearest ray intersection between pointer and current blended terrain mesh.",
+    "no_intersection_fallback": "Screen-space pan for drag and regular distance scaling for wheel zoom.",
+    "ctrl_drag": "Rotation is applied first, then panX and panY are solved to keep the pivot projected under the pointer.",
+    "shift_drag": "Retained as pan gesture, now using the same terrain-anchored projection rule as plain drag."
+  },
+  "inputs": {
+    "mouse_state": [
+      "left button",
+      "wheel delta",
+      "Ctrl key",
+      "Shift key"
+    ],
+    "camera_parameters": [
+      "yaw",
+      "pitch",
+      "dist",
+      "panX",
+      "panY"
+    ],
+    "matrices": [
+      "current MVP",
+      "inverse MVP"
+    ],
+    "terrain_mesh": "Current blended terrain mesh triangles"
+  },
+  "outputs": {
+    "ui_hint": "drag: terrain pan | wheel: zoom to terrain | ctrl+drag: pivot rotate | shift+drag: terrain pan",
+    "controls": {
+      "plain_drag": "terrain-anchored pan",
+      "shift_drag": "terrain-anchored pan",
+      "ctrl_drag": "pivot rotation",
+      "wheel": "zoom toward terrain intersection"
+    },
+    "modified_files": [
+      "scripts/lod_viewer.html",
+      "scripts/lod_viewer.js"
+    ]
+  },
+  "parameters": {
+    "rotation_yaw_scale": 0.008,
+    "rotation_pitch_scale": 0.008,
+    "zoom_scale": "exp(deltaY * 0.001)",
+    "zoom_distance_min": 0.4,
+    "zoom_distance_max": 12
+  },
+  "crs": {
+    "input_crs": "Unchanged from loaded viewer experiment, normally EPSG:3857",
+    "output_crs": "Unchanged, EPSG:3857 viewer grid",
+    "crs_inference": "No new geospatial input was introduced."
+  },
+  "rasterization": {
+    "resolution": "Unchanged; uses the already-loaded viewer mesh resolution",
+    "aggregation_rule": "Unchanged; minimum z for Cloud DEM rasterization in the project pipeline",
+    "validity_mask": "Finite cells in the selected blended surface"
+  },
+  "metrics": {
+    "computed": false,
+    "reason": "Viewer interaction-only change.",
+    "formula": "Not applicable for this UI interaction change.",
+    "samples": 0
+  },
+  "runtime": {
+    "errors": [],
+    "warnings": [],
+    "dependency_versions": {
+      "node": "18.15.0"
+    },
+    "verification": [
+      "python -m json.tool docs\\developments\\viewer_controls_redefinition_2026-05-11.json",
+      "Get-Content -Raw scripts\\lod_viewer.js | node --check",
+      "Static content checks for new hint, drag mode selection, drag anchor, pivot-preserving Ctrl rotation, and wheel zoom anchor"
+    ]
+  },
+  "artifacts": {
+    "generated": [
+      "docs/developments/viewer_controls_redefinition_2026-05-11.md",
+      "docs/developments/viewer_controls_redefinition_2026-05-11.json"
+    ],
+    "original_data_modified": false,
+    "subfolders_processed": false
+  }
+}

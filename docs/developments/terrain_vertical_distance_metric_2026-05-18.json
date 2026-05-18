@@ -1,0 +1,85 @@
+{
+  "objective": "Show the maximum vertical distance between the Terrarium DEM and Cloud DEM in the viewer interface.",
+  "assumptions": {
+    "height_units": "meters",
+    "input_crs": "EPSG:3857 for viewer grid coordinates",
+    "output_crs": "EPSG:3857 for viewer grid coordinates",
+    "comparison_models": [
+      "Terrarium DEM at the selected LoD",
+      "Cloud DEM sampled onto the selected Terrarium grid"
+    ]
+  },
+  "inputs": [
+    "Selected Terrarium LoD grid",
+    "Cloud DEM sampled on the selected Terrarium grid",
+    "Current Terrarium BBOX"
+  ],
+  "outputs": [
+    "/api/mesh terrain_comparison_metrics",
+    "Viewer status entry: Max vertical distance"
+  ],
+  "parameters": {
+    "selected_lod": "Viewer LoD control",
+    "manual_bbox": "Optional Terrarium BBOX controls",
+    "rasterization_resolution": "Selected Terrarium LoD resolution_m",
+    "per_pixel_aggregation_rule": "Cloud DEM values use the existing viewer sampling path with minimum-value resampling into the selected Terrarium grid"
+  },
+  "geospatial_data": {
+    "input_crs": "EPSG:3857",
+    "output_crs": "EPSG:3857",
+    "crs_inference": "Terrarium tiles are Web Mercator and Cloud DEM sampling is performed into the same viewer grid.",
+    "height_units": "meters",
+    "validity_mask": "finite Cloud DEM and finite Terrarium DEM samples on the selected Terrarium grid",
+    "formula": "max(abs(z_cloud_dem - z_terrarium))",
+    "metrics": [
+      "samples",
+      "max_abs_vertical_distance_m",
+      "signed_vertical_distance_at_max_m"
+    ]
+  },
+  "visualization": {
+    "viewer_entry": "Generated from /api/mesh terrain_comparison_metrics.",
+    "downsampling": "None added for this metric beyond the selected viewer grid."
+  },
+  "runtime": {
+    "experiment_generated": false,
+    "artifacts": []
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "python -m py_compile scripts\\lod_terrarium_viewer.py",
+        "status": "passed"
+      },
+      {
+        "command": "node --check .\\scripts\\lod_viewer.js",
+        "status": "failed_before_syntax_check",
+        "error": "EPERM: operation not permitted, lstat 'C:\\Users\\Jose'",
+        "node_version": "v18.15.0"
+      },
+      {
+        "command": "Get-Content -Path .\\scripts\\lod_viewer.js -Raw | node --check -",
+        "status": "passed",
+        "node_version": "v18.15.0"
+      },
+      {
+        "command": "python -m json.tool docs\\developments\\terrain_vertical_distance_metric_2026-05-18.json",
+        "status": "passed"
+      }
+    ],
+    "dependency_versions": {
+      "python": "3.10.6",
+      "node": "v18.15.0"
+    }
+  },
+  "changed_files": [
+    "scripts/lod_terrarium_viewer.py",
+    "scripts/lod_viewer.js",
+    "docs/developments/terrain_vertical_distance_metric_2026-05-18.md",
+    "docs/developments/terrain_vertical_distance_metric_2026-05-18.json"
+  ],
+  "warnings": [
+    "Existing unrelated changes were present in scripts/lod_terrarium_viewer.py and scripts/lod_viewer.js and were left intact."
+  ],
+  "errors": []
+}

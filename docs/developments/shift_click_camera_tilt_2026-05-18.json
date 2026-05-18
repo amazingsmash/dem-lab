@@ -1,0 +1,63 @@
+{
+  "objective": "Add a Shift + left click drag interaction to tilt the LoD viewer camera.",
+  "assumptions": {
+    "camera_tilt": "Viewer pitch angle",
+    "data_change": "No terrain data are modified",
+    "input_crs": "EPSG:3857 viewer terrain coordinates",
+    "output_crs": "EPSG:3857 viewer terrain coordinates"
+  },
+  "inputs": [
+    "Left mouse button state",
+    "Shift key state",
+    "Mouse vertical delta",
+    "Current camera pitch"
+  ],
+  "outputs": [
+    "Updated camera pitch during Shift + left click drag",
+    "Updated HUD control hint"
+  ],
+  "parameters": {
+    "pitch_delta": "dy * 0.008 radians",
+    "pitch_clamp": [
+      -1.45,
+      1.45
+    ],
+    "modifier_precedence": "Shift tilt takes precedence over Ctrl pivot rotation when both are held"
+  },
+  "geospatial_data": {
+    "input_crs": "EPSG:3857",
+    "output_crs": "EPSG:3857",
+    "rasterization_resolution": "Unchanged",
+    "per_pixel_aggregation_rule": "Unchanged",
+    "validity_mask": "Unchanged",
+    "metrics_recomputed": false
+  },
+  "visualization": {
+    "plain_drag": "terrain pan",
+    "ctrl_drag": "pivot rotate",
+    "shift_drag": "camera tilt"
+  },
+  "runtime": {
+    "experiment_generated": false,
+    "artifacts": []
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "Get-Content -Path .\\scripts\\lod_viewer.js -Raw | node --check -",
+        "status": "passed",
+        "node_version": "v18.15.0"
+      }
+    ]
+  },
+  "changed_files": [
+    "scripts/lod_viewer.html",
+    "scripts/lod_viewer.js",
+    "docs/developments/shift_click_camera_tilt_2026-05-18.md",
+    "docs/developments/shift_click_camera_tilt_2026-05-18.json"
+  ],
+  "warnings": [
+    "If Shift and Ctrl are both held, Shift tilt takes precedence."
+  ],
+  "errors": []
+}

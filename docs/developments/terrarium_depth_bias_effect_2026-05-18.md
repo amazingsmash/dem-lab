@@ -1,0 +1,21 @@
+# Terrarium Depth Bias Effect
+
+- Objective: add an `Effects` control that offsets the Terrarium DEM depth value without moving its visible geometry.
+- Assumptions: the entered value is in meters. Positive values move the Terrarium DEM depth test result closer to the camera; negative values move it farther from the camera.
+- Input CRS: viewer terrain coordinates are EPSG:3857 Web Mercator.
+- Output CRS: unchanged EPSG:3857 for terrain coordinates; only the WebGL depth value is biased.
+- Inputs: Terrarium DEM mesh, active camera view matrix, active projection matrix, `Terrarium depth offset (m)` text input.
+- Outputs: modified WebGL fragment depth for Terrarium DEM draw calls in wireframe, flat shading, and Phong shading modes.
+- Parameters: `terrariumDepthBiasMeters`, converted to normalized scene units as `terrariumDepthBiasMeters / scene.extent`; `-` and `+` controls step the value by exactly 1 meter.
+- Rasterization resolution: unchanged from the selected Terrarium LoD mesh.
+- Per-pixel aggregation rule: unchanged; this effect does not modify DEM sampling or metric calculations.
+- Validity mask: not applicable to raster metrics; the effect applies to rendered Terrarium fragments.
+- Formula: visible position uses `projection * view * position`; depth uses `projection * vec4(viewPos.xy, viewPos.z + biasScene, 1.0)`, then writes `gl_FragDepthEXT = clamp(ndcZ * 0.5 + 0.5, 0.0, 1.0)`.
+- Metrics: no comparison metric is changed by this visualization effect.
+- Visualization: implemented with WebGL `EXT_frag_depth`; the Terrarium DEM appears with biased depth ordering while color geometry remains in place. An information button opens a modal showing the GLSL snippet used for the depth bias.
+- Downsampling: none added.
+- Runtime: no experiment data was generated.
+- Errors: headless browser smoke test could not run because the Node runtime does not have the `playwright` module installed.
+- Warnings: this is a visualization-only depth bias. Because the viewer uses normalized scene coordinates and vertical exaggeration, the meter conversion follows the horizontal scene scale, not a geodetic camera model.
+- Dependency versions: Python 3.10.6; Node.js v18.15.0.
+- Verification: `Get-Content .\scripts\lod_viewer.js -Raw | node --check -` passed; `python -m py_compile scripts\lod_terrarium_viewer.py` passed; `python -m json.tool docs\developments\terrarium_depth_bias_effect_2026-05-18.json` passed.

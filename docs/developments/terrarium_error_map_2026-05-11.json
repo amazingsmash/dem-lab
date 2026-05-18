@@ -1,0 +1,71 @@
+{
+  "objective": "Add a viewer control that calculates the Terrarium LoD error map for the currently selected Terrarium DEM layer.",
+  "assumptions": {
+    "input_crs": "EPSG:3857",
+    "output_crs": "EPSG:3857",
+    "height_units": "meters",
+    "low_dem": "Currently selected Terrarium LoD",
+    "high_dem": "Highest configured Terrarium LoD from --max-lod",
+    "low_mesh_interpolation": "Piecewise planar interpolation over the regular viewer triangle mesh"
+  },
+  "inputs": [
+    "Viewer Terrarium LoD",
+    "Viewer Terrarium requested BBOX in EPSG:3857",
+    "Terrarium tile PNGs"
+  ],
+  "outputs": [
+    "Low-LoD grayscale hillshade PNG",
+    "High-LoD grayscale hillshade PNG",
+    "Blue-to-red absolute error PNG",
+    "Per-run Markdown report",
+    "Per-run JSON report"
+  ],
+  "parameters": {
+    "default_high_lod": "--max-lod",
+    "max_high_resolution_pixels": 4000000,
+    "hillshade_azimuth_degrees": 315,
+    "hillshade_altitude_degrees": 45,
+    "error_formula": "abs(z_high_terrarium - z_low_triangle_interpolated)",
+    "error_colormap": "blue = 0 m; red = maximum absolute error in the run"
+  },
+  "geospatial_data": {
+    "crs_inference": "Terrarium tile matrix coordinates are Web Mercator, EPSG:3857.",
+    "rasterization_resolution": "Native Terrarium pixel-center resolution for each LoD; no vector rasterization.",
+    "aggregation_rule": "Terrarium decoded elevation per source pixel; no aggregation.",
+    "validity_mask": "Finite high-resolution Terrarium samples inside the requested BBOX.",
+    "metrics": [
+      "sample count",
+      "mean absolute error",
+      "RMSE",
+      "maximum absolute error"
+    ]
+  },
+  "visualization": {
+    "low_hillshade": "Regenerable from selected low-LoD Terrarium grid.",
+    "high_hillshade": "Regenerable from high-LoD Terrarium grid.",
+    "error_map": "Regenerable from high-LoD grid and low triangle-mesh interpolation.",
+    "downsampling": "None for metric calculations."
+  },
+  "verification": {
+    "static_checks": [
+      "python -m py_compile scripts/lod_terrarium_viewer.py",
+      "node --check scripts/lod_viewer.js with bundled Node runtime"
+    ],
+    "runtime_execution": {
+      "performed": true,
+      "result": "Direct Python call generated a z10 to z15 error map with 1223540 high-resolution samples.",
+      "metrics": {
+        "samples": 1223540,
+        "max_abs_error_m": 34.502014,
+        "mean_abs_error_m": 3.8643,
+        "rmse_m": 5.732556
+      }
+    }
+  },
+  "changed_files": [
+    "scripts/lod_terrarium_viewer.py",
+    "scripts/lod_viewer.html",
+    "scripts/lod_viewer.js",
+    "scripts/lod_viewer.css"
+  ]
+}

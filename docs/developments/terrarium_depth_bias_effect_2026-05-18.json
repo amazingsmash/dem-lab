@@ -1,0 +1,85 @@
+{
+  "objective": "Add an Effects control that offsets the Terrarium DEM depth value without moving visible geometry.",
+  "assumptions": {
+    "input_units": "meters",
+    "positive_value": "moves Terrarium DEM depth closer to the camera",
+    "negative_value": "moves Terrarium DEM depth farther from the camera",
+    "input_crs": "EPSG:3857 Web Mercator for viewer terrain coordinates",
+    "output_crs": "EPSG:3857 unchanged for terrain coordinates"
+  },
+  "inputs": [
+    "Terrarium DEM mesh",
+    "Camera view matrix",
+    "Projection matrix",
+    "Terrarium depth offset (m) text input"
+  ],
+  "outputs": [
+    "Biased WebGL fragment depth for Terrarium DEM rendering"
+  ],
+  "parameters": {
+    "terrariumDepthBiasMeters": "User text input parsed as a finite number, defaulting to 0 when invalid",
+    "step_controls": "- and + controls modify terrariumDepthBiasMeters in 1 meter increments",
+    "scene_unit_conversion": "terrariumDepthBiasMeters / scene.extent",
+    "webgl_extension": "EXT_frag_depth"
+  },
+  "geospatial_data": {
+    "input_crs": "EPSG:3857",
+    "output_crs": "EPSG:3857",
+    "rasterization_resolution": "Unchanged selected Terrarium LoD mesh resolution",
+    "per_pixel_aggregation_rule": "Unchanged; this effect does not modify DEM sampling",
+    "validity_mask": "Not applicable to raster metrics; applies to rendered Terrarium fragments",
+    "comparison_metrics_changed": false
+  },
+  "visualization": {
+    "formula": "visible clip = projection * view * position; depth clip = projection * vec4(viewPos.xy, viewPos.z + biasScene, 1.0); gl_FragDepthEXT = clamp(depthClip.z / depthClip.w * 0.5 + 0.5, 0.0, 1.0)",
+    "affected_layer": "Terrarium DEM",
+    "affected_modes": [
+      "wireframe",
+      "flat shading",
+      "Phong shading"
+    ],
+    "info_modal": "An Effects information button shows the GLSL snippet used to calculate the biased fragment depth.",
+    "downsampling": "None"
+  },
+  "runtime": {
+    "experiment_generated": false,
+    "artifacts": []
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "Get-Content -Path .\\scripts\\lod_viewer.js -Raw | node --check -",
+        "status": "passed",
+        "node_version": "v18.15.0"
+      },
+      {
+        "command": "python -m py_compile scripts\\lod_terrarium_viewer.py",
+        "status": "passed",
+        "python_version": "3.10.6"
+      },
+      {
+        "command": "python -m json.tool docs\\developments\\terrarium_depth_bias_effect_2026-05-18.json",
+        "status": "passed"
+      },
+      {
+        "command": "Headless browser smoke test with Node runtime and Playwright",
+        "status": "not_run",
+        "error": "Module not found: playwright"
+      }
+    ]
+  },
+  "changed_files": [
+    "scripts/lod_viewer.html",
+    "scripts/lod_viewer.css",
+    "scripts/lod_viewer.js",
+    "docs/developments/terrarium_depth_bias_effect_2026-05-18.md",
+    "docs/developments/terrarium_depth_bias_effect_2026-05-18.json"
+  ],
+  "warnings": [
+    "This is visualization-only and does not change DEM data or metric calculations.",
+    "Meter conversion follows the viewer horizontal scene scale because the WebGL scene is normalized and vertically exaggerated."
+  ],
+  "errors": [
+    "Headless browser smoke test could not run because the Node runtime does not have the playwright module installed."
+  ]
+}

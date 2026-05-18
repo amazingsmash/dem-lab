@@ -17,6 +17,7 @@
     <summary>Layers</summary>
     <div class="layer-line">
       <label><input id="showTerrarium" type="checkbox" checked><span class="swatch blue"></span>Terrarium</label>
+      <button id="computeTerrariumError" class="icon-button" title="Calculate Terrarium LoD error map" aria-label="Calculate Terrarium LoD error map">&#9888;</button>
       <button id="frameTerrarium" class="icon-button" title="Frame Terrarium DEM" aria-label="Frame Terrarium DEM">&#128247;</button>
     </div>
     <div class="layer-line">
@@ -40,6 +41,18 @@
     <button id="openCloudSettings" type="button">Cloud DEM settings</button>
     <button id="openBlendSettings" type="button">Blending settings</button>
   </details>
+  <details>
+    <summary>Effects</summary>
+    <label for="terrariumDepthBiasMeters">Terrarium depth offset (m)</label>
+    <div class="effect-control-row">
+      <button id="decreaseTerrariumDepthBias" class="step-button" type="button" title="Move Terrarium depth 1 m farther" aria-label="Move Terrarium depth 1 m farther">-</button>
+      <input id="terrariumDepthBiasMeters" type="text" inputmode="decimal" value="0">
+      <button id="increaseTerrariumDepthBias" class="step-button" type="button" title="Move Terrarium depth 1 m closer" aria-label="Move Terrarium depth 1 m closer">+</button>
+      <button id="openDepthBiasInfo" class="info-button" type="button" title="Show depth bias GLSL" aria-label="Show depth bias GLSL">i</button>
+    </div>
+    <label for="verticalExaggeration">Vertical exaggeration</label>
+    <input id="verticalExaggeration" type="number" min="0" step="0.1" value="3">
+  </details>
   <details open>
     <summary>Sun</summary>
     <div class="row"><span>Azimuth</span><input id="sunAzimuth" type="range" min="0" max="360" value="315"><span id="sunAzimuthValue"></span></div>
@@ -57,11 +70,20 @@
     <span id="profileStatus" class="profile-status">Profile: inactive</span>
   </div>
   <div id="meta" class="status">Loading metadata...</div>
-  <div class="hint">drag: rotate | wheel: zoom | shift+drag: pan | ctrl+drag: terrain pan</div>
+  <div class="hint">drag: terrain pan | wheel: zoom to terrain | ctrl+drag: pivot rotate | shift+drag: camera tilt</div>
 </div>
 <div id="profilePanel">
   <div id="profileHeader"><span id="profileTitle">Terrain profile</span><button id="closeProfile" aria-label="Close profile">x</button></div>
   <canvas id="profileChart"></canvas>
+</div>
+<div id="terrariumErrorPanel">
+  <div id="terrariumErrorHeader"><span id="terrariumErrorTitle">Terrarium error map</span><button id="closeTerrariumError" aria-label="Close Terrarium error map">x</button></div>
+  <div id="terrariumErrorMeta"></div>
+  <div class="error-image-grid">
+    <figure><figcaption>Low LoD hillshade</figcaption><img id="terrariumLowHillshade" alt="Low LoD Terrarium hillshade"></figure>
+    <figure><figcaption>High LoD hillshade</figcaption><img id="terrariumHighHillshade" alt="High LoD Terrarium hillshade"></figure>
+    <figure><figcaption>Error map</figcaption><img id="terrariumErrorMap" alt="Terrarium error map"></figure>
+  </div>
 </div>
 <div id="cloudModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cloudModalTitle">
   <div class="modal">
@@ -139,6 +161,16 @@
     <p id="blendInfoReference" class="info-reference"></p>
     <div class="modal-actions single">
       <button id="closeBlendInfo" class="accept" type="button">Close</button>
+    </div>
+  </div>
+</div>
+<div id="depthBiasInfoModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="depthBiasInfoTitle">
+  <div class="modal code-modal">
+    <h2 id="depthBiasInfoTitle">Terrarium Depth GLSL</h2>
+    <p class="info-parameters">The visible position uses the original clip coordinate. Only the fragment depth is written from the biased camera-space z.</p>
+    <pre><code id="depthBiasCode"></code></pre>
+    <div class="modal-actions single">
+      <button id="closeDepthBiasInfo" class="accept" type="button">Close</button>
     </div>
   </div>
 </div>
